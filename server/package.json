@@ -1,0 +1,19 @@
+{
+  "name": "@shadowkhan/server",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@shadowkhan/game": "*",
+    "boardgame.io": "^0.50.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}
