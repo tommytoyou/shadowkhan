@@ -93,7 +93,7 @@ export const CARDS: Card[] = [
     name: 'A SINISTER ALLIANCE',
     type: 'action',
     effects: [
-      'You can only play this card if you have at least one Blazing Sky Goblin, Giant Sand Squid, or Battle Shock Scorpion on your field. From your deck, you may play one of the above-mentioned cards that is not already on your field.',
+      'You can only play this card if you have at least one Blazing Sky Goblin, Sand Squid, or Battle Shock Scorpion on your field. From your deck, you may play one of the above-mentioned cards that is not already on your field.',
       'If you have all three of the above-mentioned cards on your field, their BP each becomes 9 until the end of your turn.',
     ],
     image: '/cards/Sk-08.png',
@@ -115,7 +115,7 @@ export const CARDS: Card[] = [
     name: 'CYCLO OPTIC BEAM',
     type: 'power',
     effects: [
-      'This card can only be played while you have a One-Eyed Mechanical Monster on the field.',
+      'This card can only be played while you have a One Eyed Mechanical Monster on the field.',
       'Remove one Battle Card on your opponent\'s field with a BP of 7 or less.',
       'If there are no cards on your opponent\'s field, remove one from their hand.',
     ],
@@ -284,7 +284,7 @@ export const CARDS: Card[] = [
     type: 'battle',
     bp: 6,
     effects: [
-      'If you play this card while Giant Sand Squid or Battle Shock Scorpion is on your field, you can add a Sinister Alliance from your deck to your hand.',
+      'If you play this card while Sand Squid or Battle Shock Scorpion is on your field, you can add A Sinister Alliance from your deck to your hand.',
     ],
     image: '/cards/Sk-24.png',
     confidence: 'high',
@@ -297,7 +297,7 @@ export const CARDS: Card[] = [
     effects: [
       'If this card removes a Battle Card, you can remove the top card from your opponent\'s deck.',
       'You can remove face down one Action Card in your hand to stop this card from being removed after losing a battle.',
-      'If you play this card while Blazing Sky Goblin and Giant Sand Squid are on your field, you can add one face-up removed Action Card to your hand.',
+      'If you play this card while Blazing Sky Goblin and Sand Squid are on your field, you can add one face-up removed Action Card to your hand.',
     ],
     image: '/cards/Sk-25.png',
     confidence: 'high',
