@@ -1,4 +1,4 @@
-import { INVALID_MOVE, PlayerView } from 'boardgame.io/core';
+import { INVALID_MOVE } from 'boardgame.io/core';
 import type { Game } from 'boardgame.io';
 import { CARDS, CARD_BY_LABEL } from './cards';
 import type { ShadowkhanG } from './state';
@@ -38,7 +38,18 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     return G;
   },
 
-  playerView: PlayerView.STRIP_SECRETS,
+  playerView: ({ G, playerID }) => {
+    if (playerID === null || playerID === undefined) {
+      return { ...G, secret: { decks: {}, hands: {} } };
+    }
+    return {
+      ...G,
+      secret: {
+        decks: { [playerID]: G.secret.decks[playerID] ?? [] },
+        hands: { [playerID]: G.secret.hands[playerID] ?? [] },
+      },
+    };
+  },
 
   turn: {
     onBegin: ({ G, ctx }) => {
