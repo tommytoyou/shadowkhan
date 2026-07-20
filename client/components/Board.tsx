@@ -9,7 +9,8 @@ import CardBack from './CardBack';
 type Props = BoardProps<ShadowkhanG>;
 
 const OPP_HAND_CAP = 8;
-const FIELD_SLOT_BOX = 'aspect-[2.5/3.5] w-52 shrink-0 rounded-lg';
+const EMPTY_SLOT_BOX = 'h-16 w-12 rounded-md';
+const FILLED_SLOT_BOX = 'aspect-[2.5/3.5] w-44 shrink-0 rounded-lg';
 
 export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
   const [selectedHandIndex, setSelectedHandIndex] = useState<number | null>(null);
@@ -32,6 +33,9 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
   const attackedThisTurn = G.public.attackedThisTurn;
 
   const canAttack = isActive && !attackedThisTurn && selectedFieldSlot !== null;
+
+  // Subtle "what can I do next" guidance — additive only, no move-logic impact.
+  const suggestHand = isActive && selectedHandIndex === null && selectedFieldSlot === null;
 
   function clearSelection() {
     setSelectedHandIndex(null);
@@ -105,7 +109,9 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             aria-label={`Empty field slot ${slot + 1}${
               canPlaceHere ? ' - play selected card here' : ''
             }`}
-            className={`${FIELD_SLOT_BOX} border-2 border-dashed border-sk-slate bg-transparent disabled:opacity-40`}
+            className={`${EMPTY_SLOT_BOX} border border-sk-slate/30 bg-transparent transition disabled:opacity-40 ${
+              canPlaceHere ? 'ring-1 ring-sk-slate' : ''
+            }`}
           />
         );
       }
@@ -113,7 +119,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
         <div
           key={key}
           aria-label={`Opponent empty field slot ${slot + 1}`}
-          className={`${FIELD_SLOT_BOX} border-2 border-dashed border-sk-slate bg-transparent`}
+          className={`${EMPTY_SLOT_BOX} border border-sk-slate/30 bg-transparent`}
         />
       );
     }
@@ -131,7 +137,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
           aria-label={`Your field card in slot ${slot + 1}, BP ${card.currentBp}${
             isSelected ? ', selected' : ''
           }`}
-          className={`relative ${FIELD_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:opacity-50 ${
+          className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:opacity-50 ${
             isSelected ? 'border-white ring-2 ring-white' : 'border-sk-slate'
           }`}
         >
@@ -140,7 +146,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             alt=""
             className="h-full w-full rounded-lg object-contain"
           />
-          <span className="absolute -right-1.5 -top-1.5 flex h-6 w-6 items-center justify-center rounded-full border-2 border-black bg-sk-slate text-xs font-bold text-white">
+          <span className="absolute -right-2 -top-2 flex h-7 w-7 items-center justify-center rounded-full border-2 border-black bg-sk-slate text-sm font-bold text-white">
             {card.currentBp}
           </span>
         </button>
@@ -154,14 +160,14 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
         onClick={() => handleAttackField(slot)}
         disabled={!canAttack}
         aria-label={`Attack opponent field card in slot ${slot + 1}, BP ${card.currentBp}`}
-        className={`relative ${FIELD_SLOT_BOX} overflow-visible border-2 border-sk-slate bg-neutral-950 disabled:opacity-50`}
+        className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 border-sk-slate bg-neutral-950 disabled:opacity-50`}
       >
         <img
           src={cardImageSrc(card.label)}
           alt=""
           className="h-full w-full rounded-lg object-contain"
         />
-        <span className="absolute -right-1.5 -top-1.5 flex h-6 w-6 items-center justify-center rounded-full border-2 border-black bg-sk-slate text-xs font-bold text-white">
+        <span className="absolute -right-2 -top-2 flex h-7 w-7 items-center justify-center rounded-full border-2 border-black bg-sk-slate text-sm font-bold text-white">
           {card.currentBp}
         </span>
       </button>
@@ -179,157 +185,165 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
         : 'Select a hand card to play, or a field card to attack.';
 
   return (
-    <div className="flex min-h-screen w-full flex-col gap-2 bg-black p-2 text-white">
-      {/* OPPONENT ZONE */}
-      <section
-        aria-label="Opponent zone"
-        className="flex shrink-0 flex-col gap-2 border-b border-sk-slate/30 pb-2"
-      >
-        <div className="flex items-start gap-3">
-          <div className="flex shrink-0 flex-col items-center gap-1">
-            <div className="relative w-32">
-              <CardBack />
-              <span className="absolute inset-0 flex items-center justify-center text-base font-bold text-white">
-                {oppDeckCount}
-              </span>
-            </div>
-            <p className="text-[10px] text-sk-slate">Deck</p>
-          </div>
-
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
-            {Array.from({ length: visibleOppHandCount }).map((_, i) => (
-              <button
-                key={`opp-hand-${i}`}
-                type="button"
-                onClick={() => handleAttackHand(i)}
-                disabled={!canAttack}
-                aria-label={`Attack opponent hand card ${i + 1}`}
-                className="w-32 shrink-0 disabled:opacity-50"
-              >
+    <div className="min-h-screen w-full flex flex-col bg-black text-white">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
+        {/* OPPONENT ZONE */}
+        <section
+          aria-label="Opponent zone"
+          className="flex flex-col items-center gap-4 border-b border-sk-slate/20 pb-8"
+        >
+          <div className="flex w-full flex-wrap items-center justify-center gap-6">
+            <div className="flex flex-col items-center gap-1">
+              <div className="relative w-20">
                 <CardBack />
-              </button>
-            ))}
-            {hiddenOppHandCount > 0 && (
-              <span className="shrink-0 text-xs text-sk-slate">+{hiddenOppHandCount}</span>
-            )}
-          </div>
-
-          <div className="shrink-0 text-right text-xs text-sk-slate">
-            <p>Banished {oppBanished.length}</p>
-            <p>Face-down {oppBanishedFaceDown}</p>
-          </div>
-        </div>
-
-        <div className="flex gap-2">
-          {oppField.map((card, slot) => renderFieldSlot('opp', slot, card))}
-        </div>
-      </section>
-
-      {/* CENTER BAR */}
-      <section
-        aria-label="Game status and controls"
-        className="flex shrink-0 flex-col items-center gap-1 border-b border-sk-red py-1 text-center"
-      >
-        <p className="text-sm">
-          Turn: Player {ctx.currentPlayer} {isActive ? '(your turn)' : '(waiting)'} · Attacked:{' '}
-          {attackedThisTurn ? 'yes' : 'no'} · Turns — You {G.public.turnsTaken[pid] ?? 0} / Opp{' '}
-          {G.public.turnsTaken[opp] ?? 0}
-        </p>
-
-        {G.public.loser !== null ? (
-          <p className="text-lg font-bold text-white">
-            Player {G.public.loser === '0' ? '1' : '0'} wins — Player {G.public.loser} ran out of
-            cards.
-          </p>
-        ) : (
-          <p className="text-xs text-sk-slate" aria-live="polite">
-            {selectionPrompt}
-          </p>
-        )}
-
-        <div className="flex flex-wrap justify-center gap-2 pt-1">
-          <button
-            type="button"
-            onClick={handleDrawCard}
-            disabled={!isActive}
-            aria-label="Draw a card"
-            className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
-          >
-            Draw card
-          </button>
-          <button
-            type="button"
-            onClick={handleBottomUp}
-            disabled={!isActive || bottomUpUsed || ownDeckCount > 10}
-            aria-label="Move bottom card of deck to top"
-            className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
-          >
-            Bottom-up
-          </button>
-          <button
-            type="button"
-            onClick={handleAttackDeck}
-            disabled={!canAttack}
-            aria-label="Attack opponent deck"
-            className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
-          >
-            Attack deck
-          </button>
-          <button
-            type="button"
-            onClick={handleEndTurn}
-            disabled={!isActive}
-            aria-label="End turn"
-            className="rounded border-2 border-sk-red px-3 py-1 text-sm font-bold disabled:opacity-50"
-          >
-            End turn
-          </button>
-        </div>
-      </section>
-
-      {/* OWN ZONE */}
-      <section aria-label="Your zone" className="flex min-h-0 flex-1 flex-col gap-2 pt-1">
-        <div className="flex shrink-0 justify-center gap-2">
-          {ownField.map((card, slot) => renderFieldSlot('own', slot, card))}
-        </div>
-
-        <div className="flex min-h-0 flex-1 items-center gap-2 overflow-x-auto overflow-y-hidden">
-          {ownHand.map((label, i) => {
-            const isSelected = selectedHandIndex === i;
-            return (
-              <button
-                key={`own-hand-${i}-${label}`}
-                type="button"
-                onClick={() => handleSelectHandCard(i)}
-                disabled={!isActive}
-                aria-pressed={isSelected}
-                aria-label={`Your hand card ${i + 1}: ${label}${isSelected ? ', selected' : ''}`}
-                className={`aspect-[2.5/3.5] w-52 shrink-0 overflow-hidden rounded-lg border-2 bg-neutral-950 disabled:opacity-50 ${
-                  isSelected ? 'border-white ring-2 ring-white' : 'border-sk-slate'
-                }`}
-              >
-                <img
-                  src={cardImageSrc(label)}
-                  alt=""
-                  className="h-full w-full object-contain"
-                />
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="flex shrink-0 items-center gap-3 text-xs text-sk-slate">
-          <div className="flex items-center gap-1.5">
-            <div className="w-8">
-              <CardBack />
+                <span className="absolute inset-0 flex items-center justify-center text-sm font-bold text-white">
+                  {oppDeckCount}
+                </span>
+              </div>
+              <p className="text-[10px] uppercase tracking-wide text-sk-slate">Deck</p>
             </div>
-            <span>Deck {ownDeckCount}</span>
+
+            <div className="flex flex-wrap items-center justify-center gap-1.5">
+              {Array.from({ length: visibleOppHandCount }).map((_, i) => (
+                <button
+                  key={`opp-hand-${i}`}
+                  type="button"
+                  onClick={() => handleAttackHand(i)}
+                  disabled={!canAttack}
+                  aria-label={`Attack opponent hand card ${i + 1}`}
+                  className="w-20 shrink-0 disabled:opacity-50"
+                >
+                  <CardBack />
+                </button>
+              ))}
+              {hiddenOppHandCount > 0 && (
+                <span className="shrink-0 text-xs text-sk-slate">+{hiddenOppHandCount}</span>
+              )}
+            </div>
+
+            <div className="text-right text-xs text-sk-slate">
+              <p>Banished {oppBanished.length}</p>
+              <p>Face-down {oppBanishedFaceDown}</p>
+            </div>
           </div>
-          <span>Bottom-up {bottomUpUsed ? 'used' : 'available'}</span>
-          <span>Banished {ownBanished.length}</span>
-          <span>Face-down {ownBanishedFaceDown}</span>
-        </div>
-      </section>
+
+          <div className="flex items-end justify-center gap-3">
+            {oppField.map((card, slot) => renderFieldSlot('opp', slot, card))}
+          </div>
+        </section>
+
+        {/* STATUS + CONTROLS */}
+        <section
+          aria-label="Game status and controls"
+          className="flex flex-col items-center gap-2 border-b border-sk-red/60 pb-8 text-center"
+        >
+          <p className="text-sm">
+            Turn: Player {ctx.currentPlayer} {isActive ? '(your turn)' : '(waiting)'} · Attacked:{' '}
+            {attackedThisTurn ? 'yes' : 'no'} · Turns — You {G.public.turnsTaken[pid] ?? 0} / Opp{' '}
+            {G.public.turnsTaken[opp] ?? 0}
+          </p>
+
+          {G.public.loser !== null ? (
+            <p className="text-xl font-bold text-white">
+              Player {G.public.loser === '0' ? '1' : '0'} wins — Player {G.public.loser} ran out
+              of cards.
+            </p>
+          ) : (
+            <p className="text-xs text-sk-slate" aria-live="polite">
+              {selectionPrompt}
+            </p>
+          )}
+
+          <div className="flex flex-wrap justify-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={handleDrawCard}
+              disabled={!isActive}
+              aria-label="Draw a card"
+              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+            >
+              Draw card
+            </button>
+            <button
+              type="button"
+              onClick={handleBottomUp}
+              disabled={!isActive || bottomUpUsed || ownDeckCount > 10}
+              aria-label="Move bottom card of deck to top"
+              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+            >
+              Bottom-up
+            </button>
+            <button
+              type="button"
+              onClick={handleAttackDeck}
+              disabled={!canAttack}
+              aria-label="Attack opponent deck"
+              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+            >
+              Attack deck
+            </button>
+            <button
+              type="button"
+              onClick={handleEndTurn}
+              disabled={!isActive}
+              aria-label="End turn"
+              className="rounded border-2 border-sk-red px-3 py-1 text-sm font-bold disabled:opacity-50"
+            >
+              End turn
+            </button>
+          </div>
+        </section>
+
+        {/* OWN ZONE */}
+        <section aria-label="Your zone" className="flex flex-col items-center gap-5 pb-4">
+          <div className="flex items-end justify-center gap-3">
+            {ownField.map((card, slot) => renderFieldSlot('own', slot, card))}
+          </div>
+
+          <div className="flex w-full flex-nowrap items-center justify-center gap-3 overflow-x-auto px-2 pb-2">
+            {ownHand.map((label, i) => {
+              const isSelected = selectedHandIndex === i;
+              return (
+                <button
+                  key={`own-hand-${i}-${label}`}
+                  type="button"
+                  onClick={() => handleSelectHandCard(i)}
+                  disabled={!isActive}
+                  aria-pressed={isSelected}
+                  aria-label={`Your hand card ${i + 1}: ${label}${
+                    isSelected ? ', selected' : ''
+                  }`}
+                  className={`aspect-[2.5/3.5] w-44 shrink-0 overflow-hidden rounded-lg border-2 bg-neutral-950 transition disabled:opacity-50 ${
+                    isSelected
+                      ? 'border-white ring-2 ring-white'
+                      : suggestHand
+                        ? 'border-sk-slate ring-1 ring-sk-slate'
+                        : 'border-sk-slate'
+                  }`}
+                >
+                  <img
+                    src={cardImageSrc(label)}
+                    alt=""
+                    className="h-full w-full object-contain"
+                  />
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-center gap-4 text-xs text-sk-slate">
+            <div className="flex items-center gap-1.5">
+              <div className="w-8">
+                <CardBack />
+              </div>
+              <span>Deck {ownDeckCount}</span>
+            </div>
+            <span>Bottom-up {bottomUpUsed ? 'used' : 'available'}</span>
+            <span>Banished {ownBanished.length}</span>
+            <span>Face-down {ownBanishedFaceDown}</span>
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
