@@ -9,7 +9,7 @@ import CardBack from './CardBack';
 type Props = BoardProps<ShadowkhanG>;
 
 const OPP_HAND_CAP = 8;
-const FIELD_SLOT_BOX = 'aspect-[2.5/3.5] w-28 shrink-0 rounded-lg';
+const FIELD_SLOT_BOX = 'aspect-[2.5/3.5] w-52 shrink-0 rounded-lg';
 
 export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
   const [selectedHandIndex, setSelectedHandIndex] = useState<number | null>(null);
@@ -179,7 +179,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
         : 'Select a hand card to play, or a field card to attack.';
 
   return (
-    <div className="flex h-screen w-full flex-col gap-2 overflow-hidden bg-black p-2 text-white">
+    <div className="flex min-h-screen w-full flex-col gap-2 bg-black p-2 text-white">
       {/* OPPONENT ZONE */}
       <section
         aria-label="Opponent zone"
@@ -187,7 +187,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
       >
         <div className="flex items-start gap-3">
           <div className="flex shrink-0 flex-col items-center gap-1">
-            <div className="relative w-[4.5rem]">
+            <div className="relative w-32">
               <CardBack />
               <span className="absolute inset-0 flex items-center justify-center text-base font-bold text-white">
                 {oppDeckCount}
@@ -204,7 +204,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
                 onClick={() => handleAttackHand(i)}
                 disabled={!canAttack}
                 aria-label={`Attack opponent hand card ${i + 1}`}
-                className="w-[4.5rem] shrink-0 disabled:opacity-50"
+                className="w-32 shrink-0 disabled:opacity-50"
               >
                 <CardBack />
               </button>
@@ -304,7 +304,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
                 disabled={!isActive}
                 aria-pressed={isSelected}
                 aria-label={`Your hand card ${i + 1}: ${label}${isSelected ? ', selected' : ''}`}
-                className={`aspect-[2.5/3.5] w-28 shrink-0 overflow-hidden rounded-lg border-2 bg-neutral-950 disabled:opacity-50 ${
+                className={`aspect-[2.5/3.5] w-52 shrink-0 overflow-hidden rounded-lg border-2 bg-neutral-950 disabled:opacity-50 ${
                   isSelected ? 'border-white ring-2 ring-white' : 'border-sk-slate'
                 }`}
               >
