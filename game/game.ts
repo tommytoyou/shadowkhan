@@ -5,6 +5,7 @@ import type { ShadowkhanG } from './state';
 import { syncCounts } from './state';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
+const MAX_HAND_SIZE = 5;
 
 export const ShadowkhanGame: Game<ShadowkhanG> = {
   name: 'shadowkhan',
@@ -60,13 +61,16 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         G.public.turnsTaken['0'] >= 1 && G.public.turnsTaken['1'] >= 1;
 
       if (bothReady) {
-        const deck = G.secret.decks[pid];
-        if (deck.length === 0) {
-          G.public.loser = pid;
-        } else {
-          const card = deck.shift()!;
-          G.secret.hands[pid].push(card);
-          syncCounts(G);
+        const hand = G.secret.hands[pid];
+        if (hand.length < MAX_HAND_SIZE) {
+          const deck = G.secret.decks[pid];
+          if (deck.length === 0) {
+            G.public.loser = pid;
+          } else {
+            const card = deck.shift()!;
+            hand.push(card);
+            syncCounts(G);
+          }
         }
       }
     },
@@ -82,10 +86,12 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       client: false,
       move: ({ G, ctx }) => {
         const pid = ctx.currentPlayer;
+        const hand = G.secret.hands[pid];
+        if (hand.length >= MAX_HAND_SIZE) return INVALID_MOVE;
         const deck = G.secret.decks[pid];
         if (deck.length === 0) return INVALID_MOVE;
         const card = deck.shift()!;
-        G.secret.hands[pid].push(card);
+        hand.push(card);
         syncCounts(G);
       },
     },
@@ -101,7 +107,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         const label = hand[handIndex];
         const card = CARD_BY_LABEL[label];
-        if (!card || card.type !== 'battle') return INVALID_MOVE;
+        if (!card) return INVALID_MOVE;
 
         hand.splice(handIndex, 1);
         G.public.field[pid][slot] = {
@@ -210,6 +216,19 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const bottom = deck.pop()!;
         deck.unshift(bottom);
         G.public.bottomUpUsed[pid] = true;
+        syncCounts(G);
+      },
+    },
+
+    banishFromHand: {
+      client: false,
+      move: ({ G, ctx }, handIndex: number) => {
+        const pid = ctx.currentPlayer;
+        const hand = G.secret.hands[pid];
+        if (handIndex < 0 || handIndex >= hand.length) return INVALID_MOVE;
+
+        const [label] = hand.splice(handIndex, 1);
+        G.public.banished[pid].push(label);
         syncCounts(G);
       },
     },

@@ -94,6 +94,12 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
     moves.drawCard();
   }
 
+  function handleBanishFromHand() {
+    if (!isActive || selectedHandIndex === null) return;
+    moves.banishFromHand(selectedHandIndex);
+    clearSelection();
+  }
+
   function renderFieldSlot(side: 'own' | 'opp', slot: number, card: FieldCard | null) {
     const key = `${side}-field-${slot}`;
 
@@ -284,6 +290,15 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             </button>
             <button
               type="button"
+              onClick={handleBanishFromHand}
+              disabled={!isActive || selectedHandIndex === null}
+              aria-label="Banish selected hand card to banished pile"
+              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+            >
+              Banish
+            </button>
+            <button
+              type="button"
               onClick={handleEndTurn}
               disabled={!isActive}
               aria-label="End turn"
@@ -296,8 +311,28 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
 
         {/* OWN ZONE */}
         <section aria-label="Your zone" className="flex flex-col items-center gap-5 pb-4">
-          <div className="flex items-end justify-center gap-3">
-            {ownField.map((card, slot) => renderFieldSlot('own', slot, card))}
+          <div className="flex flex-row flex-nowrap w-full items-center justify-between gap-4">
+            <div className="flex flex-col items-center flex-none">
+              <div className="relative w-20">
+                <CardBack />
+                <span className="absolute inset-0 flex items-center justify-center text-base font-bold text-white">
+                  {ownDeckCount}
+                </span>
+              </div>
+              <p className="text-xs text-sk-slate">DECK</p>
+              <p className="text-xs text-sk-slate">
+                {bottomUpUsed ? 'Bottom-up used' : 'Bottom-up available'}
+              </p>
+            </div>
+
+            <div className="flex flex-row flex-nowrap items-center gap-2 flex-none">
+              {ownField.map((card, slot) => renderFieldSlot('own', slot, card))}
+            </div>
+
+            <div className="text-right text-xs text-sk-slate flex-none">
+              <p>Banished {ownBanished.length}</p>
+              <p>Face-down {ownBanishedFaceDown}</p>
+            </div>
           </div>
 
           <div className="flex w-full flex-nowrap items-center justify-center gap-3 overflow-x-auto px-2 pb-2">
@@ -329,18 +364,6 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
                 </button>
               );
             })}
-          </div>
-
-          <div className="flex flex-wrap items-center justify-center gap-4 text-xs text-sk-slate">
-            <div className="flex items-center gap-1.5">
-              <div className="w-8">
-                <CardBack />
-              </div>
-              <span>Deck {ownDeckCount}</span>
-            </div>
-            <span>Bottom-up {bottomUpUsed ? 'used' : 'available'}</span>
-            <span>Banished {ownBanished.length}</span>
-            <span>Face-down {ownBanishedFaceDown}</span>
           </div>
         </section>
       </div>
