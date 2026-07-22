@@ -1,10 +1,18 @@
 {
   "name": "shadowkhan",
   "private": true,
-  "workspaces": ["game", "client", "server"],
+  "workspaces": [
+    "game",
+    "client",
+    "server"
+  ],
   "scripts": {
     "dev:client": "npm run dev -w @shadowkhan/client",
     "dev:server": "npm run dev -w @shadowkhan/server",
-    "build": "npm run build -w @shadowkhan/game && npm run build -w @shadowkhan/client"
+    "build": "npm run build -w @shadowkhan/game && npm run build -w @shadowkhan/client",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
   }
 }

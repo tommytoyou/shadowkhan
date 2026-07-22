@@ -144,6 +144,29 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
+  // Sk-05 DIVINE SKY STRIKE: "Remove one Battle Card from the field face-up."
+  // Mandatory (no "may"), but which card is ambiguous — CHOICE_READY dispatch
+  // pattern (same shape as Sk-10 below): check for legal targets on the
+  // opponent's field first, and only open the pendingChoice if at least one
+  // exists. RULING (per instruction): opponent's field only, restricted to
+  // Battle Cards. If the opponent's field has no Battle Card, this quietly
+  // fizzles — no prompt opens.
+  'Sk-05': [
+    {
+      slot: 'a',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        const eligible = G.public.field[opp]
+          .map((c, i) => (c && CARD_BY_LABEL[c.label]?.type === 'battle' ? i : null))
+          .filter((i): i is number => i !== null);
+        if (eligible.length === 0) return;
+        openChoice(G, ctx, self, 'Sk-05', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-05']['a-target']);
+      },
+    },
+  ],
+
   // Sk-08 A SINISTER ALLIANCE: only the second effect is wired — "If you have
   // all three of the above-mentioned cards on your field, their BP each
   // becomes 9." The condition and targets are fully fixed (three named
@@ -208,6 +231,50 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
           if (eligible.length === 0) return;
           openChoice(G, ctx, self, 'Sk-10', 'field-target', CHOICE_ABILITIES_BY_LABEL['Sk-10']['field-target']);
         }
+      },
+    },
+  ],
+
+  // Sk-11 CHOSEN CONDUIT: all three printed effects wired as one flow.
+  // "Select one of those Battle Cards and increase its BP by the BP of your
+  // other Battle Cards" (a) — gated on having 2+ own Battle Cards, dispatched
+  // here; "only applied if the selected card's BP is 9 or less" (b) — checked
+  // in the target step's resolve before computing anything; "if the selected
+  // card's BP becomes more than 9, remove all cards from your field" (c) —
+  // handled via a dynamically-registered yesNo confirm step (see 'a-target'
+  // below) so the player is warned before their whole field is wiped.
+  'Sk-11': [
+    {
+      slot: 'a',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const battleSlots = G.public.field[self.pid]
+          .map((c, i) => (c && CARD_BY_LABEL[c.label]?.type === 'battle' ? i : null))
+          .filter((i): i is number => i !== null);
+        if (battleSlots.length < 2) return;
+        openChoice(G, ctx, self, 'Sk-11', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-11']['a-target']);
+      },
+    },
+  ],
+
+  // Sk-14 ONE EYED MECHANICAL MONSTER, ability b: "When this card removes a
+  // card by battle, you may remove 1 card from your opponent's hand or the
+  // top of their deck." Dispatches the initial yesNo only if the opponent
+  // has at least one legal source (hand or deck); if both are empty, no
+  // prompt opens at all. (Ability a lives in CHOICE_ABILITIES_BY_LABEL below
+  // as a plain trigger-bound entry — unlike this one it doesn't need a
+  // pre-check dispatcher, since an empty opponent field there just means the
+  // chained target step opens with zero options, which already fizzles.)
+  'Sk-14': [
+    {
+      slot: 'b',
+      trigger: 'onBattleWin',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        if (G.secret.hands[opp].length === 0 && G.secret.decks[opp].length === 0) return;
+        openChoice(G, ctx, self, 'Sk-14', 'b-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-14']['b-confirm']);
       },
     },
   ],
@@ -283,6 +350,23 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
         removeOpponentDeckTop(G, opp);
         const card = G.public.field[self.pid][self.slot];
         if (card) card.canAttack = false;
+      },
+    },
+  ],
+
+  // Sk-25 BATTLE SHOCK SCORPION: "If this card removes a Battle Card, you can
+  // remove the top card from your opponent's deck." "You can" = optional —
+  // dispatch a yesNo confirm, but only if the opponent's deck actually has a
+  // top card to take; otherwise no prompt opens.
+  'Sk-25': [
+    {
+      slot: 'a',
+      trigger: 'onBattleWin',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        if (G.secret.decks[opp].length === 0) return;
+        openChoice(G, ctx, self, 'Sk-25', 'a-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-25']['a-confirm']);
       },
     },
   ],
@@ -395,6 +479,62 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
         removeOpponentFieldCard(G, opp, answer);
       },
     },
+    // ability b: "you may remove 1 card from your opponent's hand or the top
+    // of their deck." Dispatched from ABILITIES_BY_LABEL['Sk-14'] above only
+    // when at least one source is non-empty.
+    'b-confirm': {
+      needsChoice: true,
+      prompt: "One Eyed Mechanical Monster: remove 1 card from your opponent's hand or the top of their deck?",
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, ctx, self, answer) => {
+        if (answer !== true) return;
+        const opp = self.pid === '0' ? '1' : '0';
+        const handEmpty = G.secret.hands[opp].length === 0;
+        const deckEmpty = G.secret.decks[opp].length === 0;
+        const options = [0, 1].filter((n) => (n === 0 ? !handEmpty : !deckEmpty));
+        const prompt = handEmpty
+          ? "Remove the top card of your opponent's deck."
+          : deckEmpty
+            ? "Remove 1 card from your opponent's hand."
+            : "Choose a source: (0) opponent's hand, or (1) the top of their deck.";
+        openChoice(G, ctx, self, 'Sk-14', 'b-source', {
+          ...CHOICE_ABILITIES_BY_LABEL['Sk-14']['b-source'],
+          prompt,
+          getOptions: () => options,
+        });
+      },
+    },
+    'b-source': {
+      needsChoice: true,
+      prompt: "Choose a source: (0) opponent's hand, or (1) the top of their deck.",
+      kind: 'chooseAbility',
+      getOptions: () => [0, 1],
+      resolve: (G, ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const opp = self.pid === '0' ? '1' : '0';
+        if (answer === 0) {
+          if (G.secret.hands[opp].length === 0) return;
+          openChoice(G, ctx, self, 'Sk-14', 'b-hand-target', CHOICE_ABILITIES_BY_LABEL['Sk-14']['b-hand-target']);
+        } else {
+          removeOpponentDeckTop(G, opp);
+        }
+      },
+    },
+    'b-hand-target': {
+      needsChoice: true,
+      prompt: "Choose which of your opponent's hand cards to remove.",
+      kind: 'opponentHandIndex',
+      getOptions: (G, _ctx, self) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        return G.secret.hands[opp].map((_c, i) => i);
+      },
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const opp = self.pid === '0' ? '1' : '0';
+        removeFromOpponentHand(G, opp, answer);
+      },
+    },
   },
 
   // Sk-13 MYSTICAL BLUE FLAME POWER CARD: "Choose one of the following
@@ -443,6 +583,101 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
         if (!card) return;
         const original = CARD_BY_LABEL[card.label]?.bp ?? card.currentBp;
         modifyBp(card, original - card.currentBp);
+      },
+    },
+  },
+
+  // Sk-05 DIVINE SKY STRIKE target step. Only reachable via the dispatcher in
+  // ABILITIES_BY_LABEL['Sk-05'] above.
+  'Sk-05': {
+    'a-target': {
+      needsChoice: true,
+      prompt: "Divine Sky Strike: choose which of your opponent's Battle Cards to remove.",
+      kind: 'opponentField',
+      getOptions: (G, _ctx, self) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        return G.public.field[opp]
+          .map((c, i) => (c && CARD_BY_LABEL[c.label]?.type === 'battle' ? i : null))
+          .filter((i): i is number => i !== null);
+      },
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const opp = self.pid === '0' ? '1' : '0';
+        removeOpponentFieldCard(G, opp, answer);
+      },
+    },
+  },
+
+  // Sk-11 CHOSEN CONDUIT target step. Only reachable via the dispatcher in
+  // ABILITIES_BY_LABEL['Sk-11'] above. Its resolve() implements effects b
+  // and c inline (the BP<=9 gate and the overflow field-wipe), and — only
+  // when the buff would push BP past 9 — registers a one-shot yesNo confirm
+  // entry under a dynamic key so the player is warned before losing their
+  // whole field, per the ruling to make that consequence explicit.
+  'Sk-11': {
+    'a-target': {
+      needsChoice: true,
+      prompt: 'Chosen Conduit: choose one of your Battle Cards to increase its BP by the total BP of your other Battle Cards.',
+      kind: 'ownField',
+      getOptions: (G, _ctx, self) =>
+        G.public.field[self.pid]
+          .map((c, i) => (c && CARD_BY_LABEL[c.label]?.type === 'battle' ? i : null))
+          .filter((i): i is number => i !== null),
+      resolve: (G, ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const card = G.public.field[self.pid][answer];
+        if (!card) return;
+        // effect b: only applies if the selected card's current BP is 9 or less.
+        if (card.currentBp > 9) return;
+        const others = G.public.field[self.pid].filter(
+          (c, i): c is FieldCard => i !== answer && c !== null && CARD_BY_LABEL[c.label]?.type === 'battle'
+        );
+        const delta = others.reduce((sum, c) => sum + c.currentBp, 0);
+        const newBp = card.currentBp + delta;
+        if (newBp <= 9) {
+          modifyBp(card, delta);
+          return;
+        }
+        // effect c: would push BP above 9 — confirm before wiping the field.
+        const targetSlot = answer;
+        const cardName = CARD_BY_LABEL[card.label]?.name ?? card.label;
+        const confirmKey = `a-confirm-${targetSlot}`;
+        CHOICE_ABILITIES_BY_LABEL['Sk-11'][confirmKey] = {
+          needsChoice: true,
+          prompt: `Chosen Conduit will raise ${cardName} above BP 9, which removes every card from your field. Continue?`,
+          kind: 'yesNo',
+          getOptions: () => null,
+          resolve: (G2, _ctx2, self2, answer2) => {
+            if (answer2 !== true) return;
+            const target = G2.public.field[self2.pid][targetSlot];
+            if (target) modifyBp(target, delta);
+            const ownField = G2.public.field[self2.pid];
+            for (let i = 0; i < ownField.length; i++) {
+              const c = ownField[i];
+              if (c) {
+                G2.public.banished[self2.pid].push(c.label);
+                ownField[i] = null;
+              }
+            }
+          },
+        };
+        openChoice(G, ctx, self, 'Sk-11', confirmKey, CHOICE_ABILITIES_BY_LABEL['Sk-11'][confirmKey]);
+      },
+    },
+  },
+
+  // Sk-25 BATTLE SHOCK SCORPION confirm step. Only reachable via the
+  // dispatcher in ABILITIES_BY_LABEL['Sk-25'] above.
+  'Sk-25': {
+    'a-confirm': {
+      needsChoice: true,
+      prompt: "Battle Shock Scorpion: remove the top card of your opponent's deck?",
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, _ctx, self, answer) => {
+        if (answer !== true) return;
+        const opp = self.pid === '0' ? '1' : '0';
+        removeOpponentDeckTop(G, opp);
       },
     },
   },
@@ -591,7 +826,6 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-03', slot: 'a', classification: 'GATE', reason: 'Play requirement (Sage of Dark Omen on field) not enforced — playCard has no per-card legality gates.' },
   { label: 'Sk-03', slot: 'b', classification: 'NEEDS_CHOICE', reason: 'Select which of your own field cards to remove, and whether War Dragon comes from the removed pile or the deck.' },
   { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which removed face-up card to return, and which field slot to return it to.' },
-  { label: 'Sk-05', slot: 'a', classification: 'NEEDS_CHOICE', reason: "Select which Battle Card to remove — 'the field' is ambiguous across up to 6 slots." },
   { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select a BP<=8 Battle Card from your deck.' },
   { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Select hand/deck cards to remove equal to the selected card's BP; also needs a delayed 'start of next turn' summon not currently modeled." },
   { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select 10 of your face-up removed cards' — optional, multi-select." },
@@ -600,13 +834,9 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: 'Only usable on Shadow Ghost — Power Cards have no attach-target parameter in playCard yet.' },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-09's attach targeting, which isn't wired." },
   { label: 'Sk-10', slot: 'a', classification: 'GATE', reason: 'Play requirement (One Eyed Mechanical Monster on field) not enforced.' },
-  { label: 'Sk-11', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which of your Battle Cards to buff.' },
-  { label: 'Sk-11', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-11a's selection." },
-  { label: 'Sk-11', slot: 'c', classification: 'NEEDS_CHOICE', reason: "Conditional field-wipe follow-up to Sk-11a's selection." },
   { label: 'Sk-12', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select target opponent Battle Card to lock.' },
   { label: 'Sk-12', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-12a's target selection." },
   { label: 'Sk-12', slot: 'c', classification: 'NEEDS_CHOICE', reason: 'Duration clause tied to the deferred target selection above.' },
-  { label: 'Sk-14', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 card from your opponent's hand or the top of their deck' — optional + choice of source." },
   { label: 'Sk-15', slot: 'a', classification: 'NOT_IMPLEMENTED', reason: 'No current ability performs non-battle field-card removal against a specific opponent card to guard against — nothing to intercept yet.' },
   { label: 'Sk-15', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you may return it to your hand instead' — optional replacement." },
   { label: 'Sk-16', slot: 'a', classification: 'GATE', reason: 'Play requirement (removed-card counts on both sides) not enforced.' },
@@ -621,7 +851,6 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome." },
   { label: 'Sk-23', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which hand card to discard and which deck card of matching type to retrieve.' },
   { label: 'Sk-24', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can add A Sinister Alliance from your deck' — optional." },
-  { label: 'Sk-25', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can remove the top card from your opponent's deck' — optional." },
   { label: 'Sk-25', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you can remove face down one Action Card...' — optional, selects a hand card." },
   { label: 'Sk-25', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you can add one face-up removed Action Card...' — optional, selects from the removed pool." },
   { label: 'Sk-26', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can select one Battle Card...place it under this card' — optional target selection; also needs a new 'cards attached under this card' mechanic." },

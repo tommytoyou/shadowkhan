@@ -14,7 +14,7 @@ const ALL_LABELS = CARDS.map((c) => c.label);
 const MAX_HAND_SIZE = 5;
 
 const DEV_MODE = true; // set false for normal shuffled play
-const DEV_TEST_HAND: string[] = ['Sk-14', 'Sk-13', 'Sk-10'];
+const DEV_TEST_HAND: string[] = ['Sk-14', 'Sk-27', 'Sk-11'];
 
 /** Pulls `labels` out of `deck` (mutating it) and returns them as a hand.
  *  Labels not found in the deck are skipped rather than crashing. */
