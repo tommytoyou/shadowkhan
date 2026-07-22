@@ -3,6 +3,7 @@ import type { Game } from 'boardgame.io';
 import { CARDS, CARD_BY_LABEL } from './cards';
 import type { ShadowkhanG } from './state';
 import { syncCounts } from './state';
+import { fireTrigger, modifyBp, interceptHandOrDeckAttack } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
 const MAX_HAND_SIZE = 5;
@@ -32,6 +33,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         bottomUpUsed: { '0': false, '1': false },
         attackedThisTurn: false,
         loser: null,
+        rulesOfEngagementActive: false,
       },
     };
 
@@ -78,6 +80,9 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     onEnd: ({ G, ctx }) => {
       const pid = ctx.currentPlayer;
       G.public.turnsTaken[pid] = (G.public.turnsTaken[pid] ?? 0) + 1;
+      for (const card of G.public.field[pid]) {
+        if (card) card.turnsOnField += 1;
+      }
     },
   },
 
@@ -114,8 +119,10 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
           label,
           currentBp: card.bp ?? 0,
           attached: [],
+          turnsOnField: 0,
         };
         syncCounts(G);
+        fireTrigger(G, ctx, 'onSummon', { pid, slot });
       },
     },
 
@@ -131,15 +138,33 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const attacker = G.public.field[pid][mySlot];
         const defender = G.public.field[opp][theirSlot];
         if (!attacker || !defender) return INVALID_MOVE;
+        if (attacker.canAttack === false) return INVALID_MOVE;
 
         G.public.attackedThisTurn = true;
 
         if (attacker.currentBp > defender.currentBp) {
-          G.public.banished[opp].push(defender.label);
-          G.public.field[opp][theirSlot] = null;
+          if (!defender.protectedFromBattleCardRemoval) {
+            fireTrigger(G, ctx, 'onRemoved', { pid: opp, slot: theirSlot });
+            G.public.banished[opp].push(defender.label);
+            G.public.field[opp][theirSlot] = null;
+            fireTrigger(G, ctx, 'onBattleWin', { pid, slot: mySlot });
+          }
         } else if (attacker.currentBp < defender.currentBp) {
-          G.public.banished[pid].push(attacker.label);
-          G.public.field[pid][mySlot] = null;
+          if (G.public.rulesOfEngagementActive) {
+            // RULES OF ENGAGEMENT (Sk-01): attacking a higher-BP card reduces
+            // the defender's BP by the attacker's BP instead of removing the
+            // attacker; the defender is only removed once its BP hits zero.
+            modifyBp(defender, -attacker.currentBp);
+            if (defender.currentBp <= 0 && !defender.protectedFromBattleCardRemoval) {
+              fireTrigger(G, ctx, 'onRemoved', { pid: opp, slot: theirSlot });
+              G.public.banished[opp].push(defender.label);
+              G.public.field[opp][theirSlot] = null;
+            }
+          } else if (!attacker.protectedFromBattleCardRemoval) {
+            fireTrigger(G, ctx, 'onRemoved', { pid, slot: mySlot });
+            G.public.banished[pid].push(attacker.label);
+            G.public.field[pid][mySlot] = null;
+          }
         } else {
           // Shockwave: both lose top deck card face-down
           if (G.secret.decks[pid].length > 0) {
@@ -166,6 +191,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         const attacker = G.public.field[pid][mySlot];
         if (!attacker) return INVALID_MOVE;
+        if (attacker.canAttack === false) return INVALID_MOVE;
 
         const oppHand = G.secret.hands[opp];
         if (theirHandIndex < 0 || theirHandIndex >= oppHand.length) {
@@ -173,6 +199,11 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         }
 
         G.public.attackedThisTurn = true;
+
+        const targetLabel = oppHand[theirHandIndex];
+        if (interceptHandOrDeckAttack(G, targetLabel, pid, mySlot)) {
+          return;
+        }
 
         const removed = oppHand.splice(theirHandIndex, 1)[0];
         G.public.banished[opp].push(removed);
@@ -191,10 +222,16 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         const attacker = G.public.field[pid][mySlot];
         if (!attacker) return INVALID_MOVE;
+        if (attacker.canAttack === false) return INVALID_MOVE;
 
         if (G.secret.decks[opp].length === 0) return INVALID_MOVE;
 
         G.public.attackedThisTurn = true;
+
+        const targetLabel = G.secret.decks[opp][0];
+        if (interceptHandOrDeckAttack(G, targetLabel, pid, mySlot)) {
+          return;
+        }
 
         const removed = G.secret.decks[opp].shift()!;
         G.public.banished[opp].push(removed);
