@@ -39,6 +39,34 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
 
   const canAttack = isActive && !choiceActive && !attackedThisTurn && selectedFieldSlot !== null;
 
+  const turnsReady = (G.public.turnsTaken[pid] ?? 0) >= 1;
+  const selectedFieldCard = selectedFieldSlot !== null ? ownField[selectedFieldSlot] : null;
+  const selectedCardCanAttack = selectedFieldCard ? selectedFieldCard.canAttack !== false : false;
+
+  const canAttackHandOrDeck =
+    isActive &&
+    !choiceActive &&
+    selectedFieldSlot !== null &&
+    !attackedThisTurn &&
+    turnsReady &&
+    selectedCardCanAttack;
+
+  function attackDisabledReason(resourceEmpty: boolean, resourceName: string): string | undefined {
+    if (!isActive) return 'Not your turn';
+    if (choiceActive) return 'Resolve the pending choice first';
+    if (selectedFieldSlot === null) return 'Select one of your field cards first';
+    if (attackedThisTurn) return 'You have already attacked this turn';
+    if (!turnsReady) return 'You cannot attack on your first turn';
+    if (!selectedCardCanAttack) return 'Selected card cannot attack';
+    if (resourceEmpty) return `Opponent's ${resourceName} is empty`;
+    return undefined;
+  }
+
+  const attackHandDisabled = !canAttackHandOrDeck || oppHandCount === 0;
+  const attackHandTitle = attackDisabledReason(oppHandCount === 0, 'hand');
+  const attackDeckDisabled = !canAttackHandOrDeck || oppDeckCount === 0;
+  const attackDeckTitle = attackDisabledReason(oppDeckCount === 0, 'deck');
+
   // Subtle "what can I do next" guidance — additive only, no move-logic impact.
   const suggestHand = isActive && selectedHandIndex === null && selectedFieldSlot === null;
 
@@ -78,8 +106,14 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
   }
 
   function handleAttackDeck() {
-    if (!isActive || choiceActive || selectedFieldSlot === null) return;
+    if (attackDeckDisabled || selectedFieldSlot === null) return;
     moves.attackDeck(selectedFieldSlot);
+    clearSelection();
+  }
+
+  function handleAttackHandRandom() {
+    if (attackHandDisabled || selectedFieldSlot === null) return;
+    moves.attackHandRandom(selectedFieldSlot);
     clearSelection();
   }
 
@@ -254,8 +288,34 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
           aria-label="Opponent zone"
           className="flex flex-col items-center gap-4 border-b border-sk-slate/20 pb-8"
         >
-          <div className="flex w-full flex-wrap items-center justify-center gap-6">
-            <div className="flex flex-col items-center gap-1">
+          <div className="flex w-full flex-wrap items-center justify-center gap-1.5">
+            {Array.from({ length: visibleOppHandCount }).map((_, i) => {
+              const isChoiceTarget =
+                myChoice?.kind === 'opponentHandIndex' && (myChoice.options?.includes(i) ?? false);
+              return (
+                <button
+                  key={`opp-hand-${i}`}
+                  type="button"
+                  onClick={isChoiceTarget ? () => handleResolveChoice(i) : () => handleAttackHand(i)}
+                  disabled={choiceActive ? !isChoiceTarget : !canAttack}
+                  aria-label={`${
+                    isChoiceTarget ? 'Valid target for pending choice — choose ' : 'Attack '
+                  }opponent hand card ${i + 1}`}
+                  className={`w-20 shrink-0 rounded disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
+                    isChoiceTarget ? 'ring-2 ring-sk-red' : ''
+                  }`}
+                >
+                  <CardBack />
+                </button>
+              );
+            })}
+            {hiddenOppHandCount > 0 && (
+              <span className="shrink-0 text-xs text-sk-slate">+{hiddenOppHandCount}</span>
+            )}
+          </div>
+
+          <div className="flex flex-row flex-nowrap w-full items-center justify-between gap-4">
+            <div className="flex flex-col items-center gap-1 flex-none">
               <div className="relative w-20">
                 <CardBack />
                 <span className="absolute inset-0 flex items-center justify-center text-sm font-bold text-white">
@@ -265,40 +325,14 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
               <p className="text-[10px] uppercase tracking-wide text-sk-slate">Deck</p>
             </div>
 
-            <div className="flex flex-wrap items-center justify-center gap-1.5">
-              {Array.from({ length: visibleOppHandCount }).map((_, i) => {
-                const isChoiceTarget =
-                  myChoice?.kind === 'opponentHandIndex' && (myChoice.options?.includes(i) ?? false);
-                return (
-                  <button
-                    key={`opp-hand-${i}`}
-                    type="button"
-                    onClick={isChoiceTarget ? () => handleResolveChoice(i) : () => handleAttackHand(i)}
-                    disabled={choiceActive ? !isChoiceTarget : !canAttack}
-                    aria-label={`${
-                      isChoiceTarget ? 'Valid target for pending choice — choose ' : 'Attack '
-                    }opponent hand card ${i + 1}`}
-                    className={`w-20 shrink-0 rounded disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
-                      isChoiceTarget ? 'ring-2 ring-sk-red' : ''
-                    }`}
-                  >
-                    <CardBack />
-                  </button>
-                );
-              })}
-              {hiddenOppHandCount > 0 && (
-                <span className="shrink-0 text-xs text-sk-slate">+{hiddenOppHandCount}</span>
-              )}
+            <div className="flex items-end justify-center gap-3 flex-none">
+              {oppField.map((card, slot) => renderFieldSlot('opp', slot, card))}
             </div>
 
-            <div className="text-right text-xs text-sk-slate">
+            <div className="text-right text-xs text-sk-slate flex-none">
               <p>Banished {oppBanished.length}</p>
               <p>Face-down {oppBanishedFaceDown}</p>
             </div>
-          </div>
-
-          <div className="flex items-end justify-center gap-3">
-            {oppField.map((card, slot) => renderFieldSlot('opp', slot, card))}
           </div>
         </section>
 
@@ -393,9 +427,20 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             </button>
             <button
               type="button"
+              onClick={handleAttackHandRandom}
+              disabled={attackHandDisabled}
+              aria-label="Attack a random opponent hand card"
+              title={attackHandTitle}
+              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+            >
+              Attack hand
+            </button>
+            <button
+              type="button"
               onClick={handleAttackDeck}
-              disabled={!canAttack}
+              disabled={attackDeckDisabled}
               aria-label="Attack opponent deck"
+              title={attackDeckTitle}
               className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
             >
               Attack deck

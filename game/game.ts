@@ -237,6 +237,33 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       },
     },
 
+    attackHandRandom: {
+      client: false,
+      move: ({ G, ctx, random }, mySlot: number) => {
+        if (G.public.pendingChoice) return INVALID_MOVE;
+        const pid = ctx.currentPlayer;
+        const opp = pid === '0' ? '1' : '0';
+
+        if (G.public.attackedThisTurn) return INVALID_MOVE;
+        if (G.public.turnsTaken[pid] < 1) return INVALID_MOVE;
+
+        const attacker = G.public.field[pid][mySlot];
+        if (!attacker) return INVALID_MOVE;
+        if (attacker.canAttack === false) return INVALID_MOVE;
+
+        const oppHand = G.secret.hands[opp];
+        if (oppHand.length === 0) return INVALID_MOVE;
+
+        G.public.attackedThisTurn = true;
+
+        // random.Die(n) returns 1..n inclusive — subtract 1 for a 0-based index.
+        const idx = random.Die(oppHand.length) - 1;
+        const [removed] = oppHand.splice(idx, 1);
+        G.public.banished[opp].push(removed);
+        syncCounts(G);
+      },
+    },
+
     attackDeck: {
       client: false,
       move: ({ G, ctx }, mySlot: number) => {
