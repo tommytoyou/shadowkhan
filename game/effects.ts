@@ -46,6 +46,12 @@ export interface ChoiceAbility {
   needsChoice: true;
   /** Present only on entries fireTrigger should open directly at that trigger. */
   trigger?: Trigger;
+  /** For a yesNo entry only: the key (in this same label's bucket) of the
+   *  target step answering Yes would chain into. yesNo entries have no
+   *  options list of their own (getOptions is always `() => null`), so this
+   *  is how the generic zero-target pre-check in fireTrigger looks ahead
+   *  before opening the yesNo at all — see willHaveLegalOutcome below. */
+  leadsTo?: string;
   prompt: string;
   kind: PendingChoiceKind;
   getOptions: (G: ShadowkhanG, ctx: unknown, self: AbilitySelf) => number[] | null;
@@ -263,9 +269,9 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   // top of their deck." Dispatches the initial yesNo only if the opponent
   // has at least one legal source (hand or deck); if both are empty, no
   // prompt opens at all. (Ability a lives in CHOICE_ABILITIES_BY_LABEL below
-  // as a plain trigger-bound entry — unlike this one it doesn't need a
-  // pre-check dispatcher, since an empty opponent field there just means the
-  // chained target step opens with zero options, which already fizzles.)
+  // as a plain trigger-bound entry, using its `leadsTo` field so fireTrigger's
+  // generic pre-check looks ahead at 'a-target' before opening the yesNo —
+  // see willHaveLegalOutcome in fireTrigger.)
   'Sk-14': [
     {
       slot: 'b',
@@ -413,6 +419,14 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   ],
 };
 
+// Generic zero-target guard: if a step's own option list is empty, there is
+// nothing legal to choose, so the ability resolves silently instead of
+// opening an unanswerable prompt. This covers both the initial dispatch and
+// any mid-chain openChoice() call from inside a resolve() — one place, no
+// per-card special casing. yesNo entries always report `getOptions: () =>
+// null` (no meaningful options list of their own), so they're unaffected
+// here; their zero-target case is handled by willHaveLegalOutcome below,
+// before openChoice is ever called.
 function openChoice(
   G: ShadowkhanG,
   ctx: unknown,
@@ -421,15 +435,37 @@ function openChoice(
   key: string,
   choice: ChoiceAbility
 ): void {
+  const options = choice.getOptions(G, ctx, self);
+  if (options !== null && options.length === 0) return;
   G.public.pendingChoice = {
     pid: self.pid,
     prompt: choice.prompt,
     kind: choice.kind,
-    options: choice.getOptions(G, ctx, self),
+    options,
     sourceLabel: label,
     sourceSlot: self.slot,
     abilitySlot: key,
   };
+}
+
+// For a trigger-bound yesNo entry, decides whether it should open at all.
+// A yesNo with no `leadsTo` target step is judged solely on its own terms
+// (always fine to open — e.g. Sk-25's confirm, which is pre-checked by its
+// caller before reaching here). A yesNo with `leadsTo` looks ahead at that
+// target step's option set: if answering Yes would leave nothing to select,
+// the yesNo itself must not open.
+function willHaveLegalOutcome(
+  G: ShadowkhanG,
+  ctx: unknown,
+  self: AbilitySelf,
+  label: string,
+  choice: ChoiceAbility
+): boolean {
+  if (choice.kind !== 'yesNo' || !choice.leadsTo) return true;
+  const next = CHOICE_ABILITIES_BY_LABEL[label]?.[choice.leadsTo];
+  if (!next) return true;
+  const options = next.getOptions(G, ctx, self);
+  return options === null || options.length > 0;
 }
 
 function eligibleOwnBattleCardsAtOrBelow(
@@ -450,6 +486,7 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
     a: {
       needsChoice: true,
       trigger: 'onSummon',
+      leadsTo: 'a-target',
       prompt: "One Eyed Mechanical Monster: remove one of your opponent's Battle Cards from the field?",
       kind: 'yesNo',
       getOptions: () => null,
@@ -742,7 +779,9 @@ export function fireTrigger(
     if (choices) {
       for (const [key, choice] of Object.entries(choices)) {
         if (choice.trigger === trigger) {
-          openChoice(G, ctx, self, fieldCard.label, key, choice);
+          if (willHaveLegalOutcome(G, ctx, self, fieldCard.label, choice)) {
+            openChoice(G, ctx, self, fieldCard.label, key, choice);
+          }
           break;
         }
       }

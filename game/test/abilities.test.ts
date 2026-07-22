@@ -127,14 +127,7 @@ describe('Sk-14a ONE EYED MECHANICAL MONSTER', () => {
     expect(G().public.pendingChoice).toBeNull();
   });
 
-  // KNOWN BUG — documented, not fixed here. Sk-14a's yesNo entry is a plain
-  // trigger-bound CHOICE_ABILITIES_BY_LABEL entry (unlike the dispatcher
-  // pattern used by Sk-05/Sk-10/Sk-11/Sk-25), so fireTrigger opens it
-  // unconditionally on every onSummon regardless of whether the opponent's
-  // field actually has a legal target. This test intentionally asserts the
-  // correct/expected behavior (no prompt when there's nothing to remove) and
-  // is expected to FAIL against the current implementation.
-  test('7. [EXPECTED TO FAIL — KNOWN BUG] opponent field empty: no prompt should open', () => {
+  test('7. opponent field empty: no prompt should open', () => {
     const { client, G } = createTestGame({
       players: {
         '0': { field: [], hand: ['Sk-14'] },
@@ -220,5 +213,43 @@ describe('Sk-14b ONE EYED MECHANICAL MONSTER (onBattleWin)', () => {
     expect(G().public.banished['1']).toEqual(expect.arrayContaining(['Sk-29', 'Sk-02']));
     expect(G().public.handCounts['1']).toBe(1); // hand untouched
     expect(G().public.pendingChoice).toBeNull();
+  });
+});
+
+describe('Sk-05a DIVINE SKY STRIKE', () => {
+  test('11. opponent field holds a Battle Card: Sk-05 fires and removes it', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-05'] },
+        '1': { field: ['Sk-29'] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('opponentField');
+    expect(pending?.options).toEqual([0]);
+
+    client.moves.resolveChoice(0);
+
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-29');
+    expect(G().public.pendingChoice).toBeNull();
+  });
+
+  test('12. opponent field empty: Sk-05 resolves silently, no prompt opens', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-05'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-05');
   });
 });
