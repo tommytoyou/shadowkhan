@@ -10,6 +10,29 @@ export interface FieldCard {
   protectedFromBattleCardRemoval?: boolean;
 }
 
+export type PendingChoiceKind =
+  | 'opponentField'
+  | 'ownField'
+  | 'opponentHandIndex'
+  | 'ownHandIndex'
+  | 'yesNo'
+  | 'chooseAbility';
+
+export interface PendingChoice {
+  /** Player who must answer. */
+  pid: string;
+  prompt: string;
+  kind: PendingChoiceKind;
+  /** Valid numeric answers (field slot / hand index / ability index), or null for yesNo. */
+  options: number[] | null;
+  /** Label of the card whose ability is waiting on this answer. */
+  sourceLabel: string;
+  /** Field slot of the card whose ability is waiting, if it's still field-resident. */
+  sourceSlot: number | null;
+  /** Registry key identifying which (possibly chained) choice step this is. */
+  abilitySlot: string;
+}
+
 export interface SecretState {
   decks: Record<string, string[]>;
   hands: Record<string, string[]>;
@@ -28,6 +51,8 @@ export interface PublicState {
   /** Global rule flip from RULES OF ENGAGEMENT (Sk-01): losing the BP comparison
    *  reduces the defender's BP instead of removing the attacker. */
   rulesOfEngagementActive: boolean;
+  /** Non-null while an ability is waiting on player input; blocks other moves until resolved. */
+  pendingChoice: PendingChoice | null;
 }
 
 export interface ShadowkhanG {

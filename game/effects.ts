@@ -1,5 +1,5 @@
 import { CARD_BY_LABEL } from './cards';
-import type { FieldCard, ShadowkhanG } from './state';
+import type { FieldCard, PendingChoiceKind, ShadowkhanG } from './state';
 import { syncCounts } from './state';
 
 export type Trigger =
@@ -27,6 +27,34 @@ export interface Ability {
   trigger: Trigger;
   auto: true;
   run: EffectFn;
+}
+
+// ---------------------------------------------------------------------------
+// Target-selection system. An ability that can't resolve immediately (a
+// "you may", or a choice among several legal targets) opens a pendingChoice
+// on G.public instead of mutating state right away, and returns. The engine
+// pauses — see the pendingChoice guards added to every move in game.ts —
+// until resolveChoice() answers it, which runs `resolve`. `resolve` may
+// itself call openChoice() again to chain into a second question (e.g.
+// "remove one? -> yes -> which one?"), by referencing another entry in this
+// same card's CHOICE_ABILITIES_BY_LABEL bucket under a different key. Only
+// entries with a `trigger` are auto-opened by fireTrigger; chained/"-target"
+// entries are only reachable via another step's resolve().
+// ---------------------------------------------------------------------------
+
+export interface ChoiceAbility {
+  needsChoice: true;
+  /** Present only on entries fireTrigger should open directly at that trigger. */
+  trigger?: Trigger;
+  prompt: string;
+  kind: PendingChoiceKind;
+  getOptions: (G: ShadowkhanG, ctx: unknown, self: AbilitySelf) => number[] | null;
+  resolve: (
+    G: ShadowkhanG,
+    ctx: unknown,
+    self: AbilitySelf,
+    answer: number | boolean
+  ) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +177,41 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
+  // Sk-10 CYCLO OPTIC BEAM: effects b+c wired as a single dispatcher — no
+  // "may"/"can" in either clause, so both are mandatory, but which target
+  // qualifies depends on game state, which is why they were deferred as
+  // NEEDS_CHOICE originally. "Remove one Battle Card on your opponent's
+  // field with a BP of 7 or less. If there are no cards on your opponent's
+  // field, remove one from their hand." This run() makes the (choice-free)
+  // branch decision from state, then opens whichever target choice applies:
+  // an opponentField choice filtered to BP<=7, or — when the opponent's
+  // field is completely empty — an opponentHandIndex choice. If a branch has
+  // zero legal targets the ability quietly fizzles (no pendingChoice opens).
+  // effect a (the "only while you have One Eyed Mechanical Monster" play
+  // requirement) remains an unenforced GATE, as with other play requirements.
+  'Sk-10': [
+    {
+      slot: 'b',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        const oppField = G.public.field[opp];
+        const fieldIsEmpty = oppField.every((c) => c === null);
+        if (fieldIsEmpty) {
+          if (G.secret.hands[opp].length === 0) return;
+          openChoice(G, ctx, self, 'Sk-10', 'hand-target', CHOICE_ABILITIES_BY_LABEL['Sk-10']['hand-target']);
+        } else {
+          const eligible = oppField
+            .map((c, i) => (c && c.currentBp <= 7 ? i : null))
+            .filter((i): i is number => i !== null);
+          if (eligible.length === 0) return;
+          openChoice(G, ctx, self, 'Sk-10', 'field-target', CHOICE_ABILITIES_BY_LABEL['Sk-10']['field-target']);
+        }
+      },
+    },
+  ],
+
   // Sk-16 WAR DRAGON: "This card cannot be removed by Battle Cards." (effect
   // b only — a and unlike its neighbours, has no "may"/"can".) Unconditional,
   // self-targeted. Implemented as a permanent flag checked in attackBattleCard.
@@ -266,6 +329,161 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   ],
 };
 
+function openChoice(
+  G: ShadowkhanG,
+  ctx: unknown,
+  self: AbilitySelf,
+  label: string,
+  key: string,
+  choice: ChoiceAbility
+): void {
+  G.public.pendingChoice = {
+    pid: self.pid,
+    prompt: choice.prompt,
+    kind: choice.kind,
+    options: choice.getOptions(G, ctx, self),
+    sourceLabel: label,
+    sourceSlot: self.slot,
+    abilitySlot: key,
+  };
+}
+
+function eligibleOwnBattleCardsAtOrBelow(
+  G: ShadowkhanG,
+  self: AbilitySelf,
+  maxBp: number
+): number[] {
+  return G.public.field[self.pid]
+    .map((c, i) => (c && c.currentBp <= maxBp ? i : null))
+    .filter((i): i is number => i !== null);
+}
+
+const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> = {
+  // Sk-14 ONE EYED MECHANICAL MONSTER, ability a: "When this card is
+  // summoned, you may remove 1 of your opponent's Battle Cards from the
+  // field." A yesNo entry, chaining into an opponentField target pick.
+  'Sk-14': {
+    a: {
+      needsChoice: true,
+      trigger: 'onSummon',
+      prompt: "One Eyed Mechanical Monster: remove one of your opponent's Battle Cards from the field?",
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, ctx, self, answer) => {
+        if (answer !== true) return;
+        const opp = self.pid === '0' ? '1' : '0';
+        const options = G.public.field[opp]
+          .map((c, i) => (c ? i : null))
+          .filter((i): i is number => i !== null);
+        if (options.length === 0) return;
+        openChoice(G, ctx, self, 'Sk-14', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-14']['a-target']);
+      },
+    },
+    'a-target': {
+      needsChoice: true,
+      prompt: "Choose which of your opponent's Battle Cards to remove.",
+      kind: 'opponentField',
+      getOptions: (G, _ctx, self) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        return G.public.field[opp]
+          .map((c, i) => (c ? i : null))
+          .filter((i): i is number => i !== null);
+      },
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const opp = self.pid === '0' ? '1' : '0';
+        removeOpponentFieldCard(G, opp, answer);
+      },
+    },
+  },
+
+  // Sk-13 MYSTICAL BLUE FLAME POWER CARD: "Choose one of the following
+  // effects when activated: [0] Increase the BP of one of your Battle Cards
+  // by +1 ... / [1] Restore the BP of one of your Battle Cards to its
+  // original BP ..." Usable only on Battle Cards with BP<=6. A chooseAbility
+  // entry, chaining into an ownField target pick for whichever branch was
+  // picked. CAVEAT: both branches apply immediately in this pass — the
+  // printed "until end of your turn" (branch 0) and "at the end of your
+  // opponent's turn after activated" delay (branch 1) aren't modeled; there's
+  // no temporary/delayed-effect scheduler yet.
+  'Sk-13': {
+    a: {
+      needsChoice: true,
+      trigger: 'onSummon',
+      prompt: 'Mystical Blue Flame — choose an effect: (0) +1 BP to a Battle Card of yours, or (1) restore one of your Battle Cards to its original BP.',
+      kind: 'chooseAbility',
+      getOptions: () => [0, 1],
+      resolve: (G, ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const eligible = eligibleOwnBattleCardsAtOrBelow(G, self, 6);
+        if (eligible.length === 0) return;
+        const key = answer === 0 ? 'a-target-buff' : 'a-target-restore';
+        openChoice(G, ctx, self, 'Sk-13', key, CHOICE_ABILITIES_BY_LABEL['Sk-13'][key]);
+      },
+    },
+    'a-target-buff': {
+      needsChoice: true,
+      prompt: 'Choose one of your Battle Cards (BP 6 or less) to gain +1 BP.',
+      kind: 'ownField',
+      getOptions: (G, _ctx, self) => eligibleOwnBattleCardsAtOrBelow(G, self, 6),
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const card = G.public.field[self.pid][answer];
+        if (card) modifyBp(card, 1);
+      },
+    },
+    'a-target-restore': {
+      needsChoice: true,
+      prompt: 'Choose one of your Battle Cards (BP 6 or less) to restore to its original BP.',
+      kind: 'ownField',
+      getOptions: (G, _ctx, self) => eligibleOwnBattleCardsAtOrBelow(G, self, 6),
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const card = G.public.field[self.pid][answer];
+        if (!card) return;
+        const original = CARD_BY_LABEL[card.label]?.bp ?? card.currentBp;
+        modifyBp(card, original - card.currentBp);
+      },
+    },
+  },
+
+  // Sk-10 CYCLO OPTIC BEAM target-selection steps. Only reachable via the
+  // dispatcher in ABILITIES_BY_LABEL['Sk-10'] above (neither entry has a
+  // `trigger`, so fireTrigger never opens them directly).
+  'Sk-10': {
+    'field-target': {
+      needsChoice: true,
+      prompt: "Choose which of your opponent's Battle Cards (BP 7 or less) to remove.",
+      kind: 'opponentField',
+      getOptions: (G, _ctx, self) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        return G.public.field[opp]
+          .map((c, i) => (c && c.currentBp <= 7 ? i : null))
+          .filter((i): i is number => i !== null);
+      },
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const opp = self.pid === '0' ? '1' : '0';
+        removeOpponentFieldCard(G, opp, answer);
+      },
+    },
+    'hand-target': {
+      needsChoice: true,
+      prompt: "Your opponent's field is empty — choose which of their hand cards to remove.",
+      kind: 'opponentHandIndex',
+      getOptions: (G, _ctx, self) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        return G.secret.hands[opp].map((_c, i) => i);
+      },
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const opp = self.pid === '0' ? '1' : '0';
+        removeFromOpponentHand(G, opp, answer);
+      },
+    },
+  },
+};
+
 export function fireTrigger(
   G: ShadowkhanG,
   ctx: unknown,
@@ -276,15 +494,58 @@ export function fireTrigger(
   if (!fieldCard) return;
 
   const abilities = ABILITIES_BY_LABEL[fieldCard.label];
-  if (!abilities || abilities.length === 0) return;
+  if (abilities) {
+    for (const ability of abilities) {
+      if (ability.auto && ability.trigger === trigger) {
+        ability.run({ G, ctx, self });
+      }
+    }
+  }
 
-  for (const ability of abilities) {
-    if (ability.auto && ability.trigger === trigger) {
-      ability.run({ G, ctx, self });
+  if (!G.public.pendingChoice) {
+    const choices = CHOICE_ABILITIES_BY_LABEL[fieldCard.label];
+    if (choices) {
+      for (const [key, choice] of Object.entries(choices)) {
+        if (choice.trigger === trigger) {
+          openChoice(G, ctx, self, fieldCard.label, key, choice);
+          break;
+        }
+      }
     }
   }
 
   syncCounts(G);
+}
+
+/** Resolves G.public.pendingChoice with `answer`. Returns false (and leaves
+ *  pendingChoice untouched) if there's nothing pending or the answer isn't a
+ *  legal option, so the move layer can turn that into INVALID_MOVE. */
+export function resolvePendingChoice(
+  G: ShadowkhanG,
+  ctx: unknown,
+  answer: number | boolean
+): boolean {
+  const pending = G.public.pendingChoice;
+  if (!pending) return false;
+
+  const choice = CHOICE_ABILITIES_BY_LABEL[pending.sourceLabel]?.[pending.abilitySlot];
+  if (!choice) {
+    G.public.pendingChoice = null;
+    return false;
+  }
+
+  if (pending.kind === 'yesNo') {
+    if (typeof answer !== 'boolean') return false;
+  } else {
+    if (typeof answer !== 'number') return false;
+    if (pending.options !== null && !pending.options.includes(answer)) return false;
+  }
+
+  const self: AbilitySelf = { pid: pending.pid, slot: pending.sourceSlot ?? -1 };
+  G.public.pendingChoice = null;
+  choice.resolve(G, ctx, self, answer);
+  syncCounts(G);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,18 +600,12 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: 'Only usable on Shadow Ghost — Power Cards have no attach-target parameter in playCard yet.' },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-09's attach targeting, which isn't wired." },
   { label: 'Sk-10', slot: 'a', classification: 'GATE', reason: 'Play requirement (One Eyed Mechanical Monster on field) not enforced.' },
-  { label: 'Sk-10', slot: 'b', classification: 'NEEDS_CHOICE', reason: 'Select which opponent Battle Card with BP<=7 to remove — multiple may qualify.' },
-  { label: 'Sk-10', slot: 'c', classification: 'NEEDS_CHOICE', reason: 'Select which opponent hand card to remove.' },
   { label: 'Sk-11', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which of your Battle Cards to buff.' },
   { label: 'Sk-11', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-11a's selection." },
   { label: 'Sk-11', slot: 'c', classification: 'NEEDS_CHOICE', reason: "Conditional field-wipe follow-up to Sk-11a's selection." },
   { label: 'Sk-12', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select target opponent Battle Card to lock.' },
   { label: 'Sk-12', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-12a's target selection." },
   { label: 'Sk-12', slot: 'c', classification: 'NEEDS_CHOICE', reason: 'Duration clause tied to the deferred target selection above.' },
-  { label: 'Sk-13', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'Choose one of the following effects' — explicit branch choice." },
-  { label: 'Sk-13', slot: 'b', classification: 'NEEDS_CHOICE', reason: 'One branch of the choice above; also needs target selection.' },
-  { label: 'Sk-13', slot: 'c', classification: 'NEEDS_CHOICE', reason: 'Other branch of the choice above; also needs target selection.' },
-  { label: 'Sk-14', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 of your opponent's Battle Cards' — optional + select which." },
   { label: 'Sk-14', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 card from your opponent's hand or the top of their deck' — optional + choice of source." },
   { label: 'Sk-15', slot: 'a', classification: 'NOT_IMPLEMENTED', reason: 'No current ability performs non-battle field-card removal against a specific opponent card to guard against — nothing to intercept yet.' },
   { label: 'Sk-15', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you may return it to your hand instead' — optional replacement." },

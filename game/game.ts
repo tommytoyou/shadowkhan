@@ -3,10 +3,31 @@ import type { Game } from 'boardgame.io';
 import { CARDS, CARD_BY_LABEL } from './cards';
 import type { ShadowkhanG } from './state';
 import { syncCounts } from './state';
-import { fireTrigger, modifyBp, interceptHandOrDeckAttack } from './effects';
+import {
+  fireTrigger,
+  modifyBp,
+  interceptHandOrDeckAttack,
+  resolvePendingChoice,
+} from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
 const MAX_HAND_SIZE = 5;
+
+const DEV_MODE = true; // set false for normal shuffled play
+const DEV_TEST_HAND: string[] = ['Sk-14', 'Sk-13', 'Sk-10'];
+
+/** Pulls `labels` out of `deck` (mutating it) and returns them as a hand.
+ *  Labels not found in the deck are skipped rather than crashing. */
+function pullTestHand(deck: string[], labels: string[]): string[] {
+  const hand: string[] = [];
+  for (const label of labels) {
+    const index = deck.indexOf(label);
+    if (index === -1) continue;
+    deck.splice(index, 1);
+    hand.push(label);
+  }
+  return hand;
+}
 
 export const ShadowkhanGame: Game<ShadowkhanG> = {
   name: 'shadowkhan',
@@ -15,8 +36,8 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     const deck0 = random.Shuffle([...ALL_LABELS]);
     const deck1 = random.Shuffle([...ALL_LABELS]);
 
-    const hand0 = deck0.splice(0, 3);
-    const hand1 = deck1.splice(0, 3);
+    const hand0 = DEV_MODE ? pullTestHand(deck0, DEV_TEST_HAND) : deck0.splice(0, 3);
+    const hand1 = DEV_MODE ? pullTestHand(deck1, DEV_TEST_HAND) : deck1.splice(0, 3);
 
     const G: ShadowkhanG = {
       secret: {
@@ -34,6 +55,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         attackedThisTurn: false,
         loser: null,
         rulesOfEngagementActive: false,
+        pendingChoice: null,
       },
     };
 
@@ -90,6 +112,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     drawCard: {
       client: false,
       move: ({ G, ctx }) => {
+        if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const hand = G.secret.hands[pid];
         if (hand.length >= MAX_HAND_SIZE) return INVALID_MOVE;
@@ -104,6 +127,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     playCard: {
       client: false,
       move: ({ G, ctx }, handIndex: number, slot: number) => {
+        if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const hand = G.secret.hands[pid];
         if (handIndex < 0 || handIndex >= hand.length) return INVALID_MOVE;
@@ -129,6 +153,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     attackBattleCard: {
       client: false,
       move: ({ G, ctx }, mySlot: number, theirSlot: number) => {
+        if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
 
@@ -183,6 +208,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     attackHand: {
       client: false,
       move: ({ G, ctx }, mySlot: number, theirHandIndex: number) => {
+        if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
 
@@ -214,6 +240,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     attackDeck: {
       client: false,
       move: ({ G, ctx }, mySlot: number) => {
+        if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
 
@@ -242,6 +269,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     bottomUp: {
       client: false,
       move: ({ G, ctx }) => {
+        if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
 
         if (G.public.bottomUpUsed[pid]) return INVALID_MOVE;
@@ -260,6 +288,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
     banishFromHand: {
       client: false,
       move: ({ G, ctx }, handIndex: number) => {
+        if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const hand = G.secret.hands[pid];
         if (handIndex < 0 || handIndex >= hand.length) return INVALID_MOVE;
@@ -270,7 +299,18 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       },
     },
 
-    endTurn: ({ events }) => {
+    resolveChoice: {
+      client: false,
+      move: ({ G, ctx }, answer: number | boolean) => {
+        const pending = G.public.pendingChoice;
+        if (!pending) return INVALID_MOVE;
+        if (pending.pid !== ctx.currentPlayer) return INVALID_MOVE;
+        if (!resolvePendingChoice(G, ctx, answer)) return INVALID_MOVE;
+      },
+    },
+
+    endTurn: ({ G, events }) => {
+      if (G.public.pendingChoice) return INVALID_MOVE;
       events.endTurn();
     },
   },

@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import type { BoardProps } from 'boardgame.io/react';
-import type { ShadowkhanG, FieldCard } from '@shadowkhan/game';
+import type { ShadowkhanG, FieldCard, PendingChoice, PendingChoiceKind } from '@shadowkhan/game';
 import { cardImageSrc } from '../lib/cardImage';
 import CardBack from './CardBack';
 
@@ -32,7 +32,12 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
   const bottomUpUsed = G.public.bottomUpUsed[pid] ?? false;
   const attackedThisTurn = G.public.attackedThisTurn;
 
-  const canAttack = isActive && !attackedThisTurn && selectedFieldSlot !== null;
+  const pendingChoice: PendingChoice | null = G.public.pendingChoice ?? null;
+  const choiceActive = pendingChoice !== null;
+  const myChoice = pendingChoice && pendingChoice.pid === pid ? pendingChoice : null;
+  const waitingForOpponentChoice = pendingChoice !== null && pendingChoice.pid !== pid;
+
+  const canAttack = isActive && !choiceActive && !attackedThisTurn && selectedFieldSlot !== null;
 
   // Subtle "what can I do next" guidance — additive only, no move-logic impact.
   const suggestHand = isActive && selectedHandIndex === null && selectedFieldSlot === null;
@@ -43,61 +48,101 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
   }
 
   function handleSelectHandCard(index: number) {
-    if (!isActive) return;
+    if (!isActive || choiceActive) return;
     setSelectedFieldSlot(null);
     setSelectedHandIndex((prev) => (prev === index ? null : index));
   }
 
   function handleSelectFieldCard(slot: number) {
-    if (!isActive || attackedThisTurn) return;
+    if (!isActive || choiceActive || attackedThisTurn) return;
     setSelectedHandIndex(null);
     setSelectedFieldSlot((prev) => (prev === slot ? null : slot));
   }
 
   function handlePlayIntoSlot(slot: number) {
-    if (!isActive || selectedHandIndex === null) return;
+    if (!isActive || choiceActive || selectedHandIndex === null) return;
     moves.playCard(selectedHandIndex, slot);
     clearSelection();
   }
 
   function handleAttackField(theirSlot: number) {
-    if (!isActive || selectedFieldSlot === null) return;
+    if (!isActive || choiceActive || selectedFieldSlot === null) return;
     moves.attackBattleCard(selectedFieldSlot, theirSlot);
     clearSelection();
   }
 
   function handleAttackHand(theirHandIndex: number) {
-    if (!isActive || selectedFieldSlot === null) return;
+    if (!isActive || choiceActive || selectedFieldSlot === null) return;
     moves.attackHand(selectedFieldSlot, theirHandIndex);
     clearSelection();
   }
 
   function handleAttackDeck() {
-    if (!isActive || selectedFieldSlot === null) return;
+    if (!isActive || choiceActive || selectedFieldSlot === null) return;
     moves.attackDeck(selectedFieldSlot);
     clearSelection();
   }
 
   function handleBottomUp() {
-    if (!isActive) return;
+    if (!isActive || choiceActive) return;
     moves.bottomUp();
   }
 
   function handleEndTurn() {
-    if (!isActive) return;
+    if (!isActive || choiceActive) return;
     moves.endTurn();
     clearSelection();
   }
 
   function handleDrawCard() {
-    if (!isActive) return;
+    if (!isActive || choiceActive) return;
     moves.drawCard();
   }
 
   function handleBanishFromHand() {
-    if (!isActive || selectedHandIndex === null) return;
+    if (!isActive || choiceActive || selectedHandIndex === null) return;
     moves.banishFromHand(selectedHandIndex);
     clearSelection();
+  }
+
+  function handleResolveChoice(answer: number | boolean) {
+    if (!myChoice) return;
+    moves.resolveChoice(answer);
+    clearSelection();
+  }
+
+  function choiceOptionLabel(kind: PendingChoiceKind, opt: number): string {
+    switch (kind) {
+      case 'opponentField': {
+        const card = oppField[opt];
+        return card ? `Slot ${opt + 1}: ${card.label} (BP ${card.currentBp})` : `Slot ${opt + 1}`;
+      }
+      case 'ownField': {
+        const card = ownField[opt];
+        return card ? `Slot ${opt + 1}: ${card.label} (BP ${card.currentBp})` : `Slot ${opt + 1}`;
+      }
+      case 'opponentHandIndex':
+        return `Opponent hand card ${opt + 1}`;
+      case 'ownHandIndex':
+        return `Your hand card ${opt + 1}: ${ownHand[opt] ?? ''}`;
+      case 'chooseAbility':
+        return `Choice ${opt + 1}`;
+      default:
+        return `Option ${opt + 1}`;
+    }
+  }
+
+  /** Non-null when this field slot is a valid answer to my pending choice —
+   *  used to redirect the existing field-slot button into resolveChoice(). */
+  function fieldChoiceTarget(side: 'own' | 'opp', slot: number): (() => void) | null {
+    if (!myChoice) return null;
+    if (side === 'own' && myChoice.kind === 'ownField' && myChoice.options?.includes(slot)) {
+      return () => handleResolveChoice(slot);
+    }
+    if (side === 'opp' && myChoice.kind === 'opponentField' && myChoice.options?.includes(slot)) {
+      return () => handleResolveChoice(slot);
+    }
+    return null;
   }
 
   function renderFieldSlot(side: 'own' | 'opp', slot: number, card: FieldCard | null) {
@@ -105,7 +150,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
 
     if (!card) {
       if (side === 'own') {
-        const canPlaceHere = isActive && selectedHandIndex !== null;
+        const canPlaceHere = isActive && !choiceActive && selectedHandIndex !== null;
         return (
           <button
             key={key}
@@ -130,21 +175,28 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
       );
     }
 
+    const choiceTarget = fieldChoiceTarget(side, slot);
+    const isChoiceTarget = choiceTarget !== null;
+
     if (side === 'own') {
       const isSelected = selectedFieldSlot === slot;
-      const disabled = !isActive || attackedThisTurn;
+      const disabled = choiceActive ? !isChoiceTarget : !isActive || attackedThisTurn;
       return (
         <button
           key={key}
           type="button"
-          onClick={() => handleSelectFieldCard(slot)}
+          onClick={choiceTarget ?? (() => handleSelectFieldCard(slot))}
           disabled={disabled}
           aria-pressed={isSelected}
           aria-label={`Your field card in slot ${slot + 1}, BP ${card.currentBp}${
-            isSelected ? ', selected' : ''
+            isChoiceTarget ? ', valid target for pending choice — click to choose' : isSelected ? ', selected' : ''
           }`}
-          className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:opacity-50 ${
-            isSelected ? 'border-white ring-2 ring-white' : 'border-sk-slate'
+          className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
+            isChoiceTarget
+              ? 'border-sk-red ring-2 ring-sk-red'
+              : isSelected
+                ? 'border-white ring-2 ring-white'
+                : 'border-sk-slate'
           }`}
         >
           <img
@@ -163,10 +215,14 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
       <button
         key={key}
         type="button"
-        onClick={() => handleAttackField(slot)}
-        disabled={!canAttack}
-        aria-label={`Attack opponent field card in slot ${slot + 1}, BP ${card.currentBp}`}
-        className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 border-sk-slate bg-neutral-950 disabled:opacity-50`}
+        onClick={choiceTarget ?? (() => handleAttackField(slot))}
+        disabled={choiceActive ? !isChoiceTarget : !canAttack}
+        aria-label={`${isChoiceTarget ? 'Valid target for pending choice — choose ' : 'Attack '}opponent field card in slot ${
+          slot + 1
+        }, BP ${card.currentBp}`}
+        className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
+          isChoiceTarget ? 'border-sk-red ring-2 ring-sk-red' : 'border-sk-slate'
+        }`}
       >
         <img
           src={cardImageSrc(card.label)}
@@ -210,18 +266,26 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             </div>
 
             <div className="flex flex-wrap items-center justify-center gap-1.5">
-              {Array.from({ length: visibleOppHandCount }).map((_, i) => (
-                <button
-                  key={`opp-hand-${i}`}
-                  type="button"
-                  onClick={() => handleAttackHand(i)}
-                  disabled={!canAttack}
-                  aria-label={`Attack opponent hand card ${i + 1}`}
-                  className="w-20 shrink-0 disabled:opacity-50"
-                >
-                  <CardBack />
-                </button>
-              ))}
+              {Array.from({ length: visibleOppHandCount }).map((_, i) => {
+                const isChoiceTarget =
+                  myChoice?.kind === 'opponentHandIndex' && (myChoice.options?.includes(i) ?? false);
+                return (
+                  <button
+                    key={`opp-hand-${i}`}
+                    type="button"
+                    onClick={isChoiceTarget ? () => handleResolveChoice(i) : () => handleAttackHand(i)}
+                    disabled={choiceActive ? !isChoiceTarget : !canAttack}
+                    aria-label={`${
+                      isChoiceTarget ? 'Valid target for pending choice — choose ' : 'Attack '
+                    }opponent hand card ${i + 1}`}
+                    className={`w-20 shrink-0 rounded disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
+                      isChoiceTarget ? 'ring-2 ring-sk-red' : ''
+                    }`}
+                  >
+                    <CardBack />
+                  </button>
+                );
+              })}
               {hiddenOppHandCount > 0 && (
                 <span className="shrink-0 text-xs text-sk-slate">+{hiddenOppHandCount}</span>
               )}
@@ -254,6 +318,54 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
               Player {G.public.loser === '0' ? '1' : '0'} wins — Player {G.public.loser} ran out
               of cards.
             </p>
+          ) : myChoice ? (
+            <div
+              role="group"
+              aria-label="Pending ability choice"
+              className="flex flex-col items-center gap-2 rounded-lg border-2 border-sk-red px-4 py-3"
+            >
+              <p className="text-sm font-semibold text-white" aria-live="assertive">
+                {myChoice.prompt}
+              </p>
+              <div className="flex flex-wrap justify-center gap-2">
+                {myChoice.kind === 'yesNo' ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => handleResolveChoice(true)}
+                      aria-label="Yes"
+                      className="rounded border-2 border-sk-red px-4 py-1 text-sm font-bold text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white"
+                    >
+                      Yes
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleResolveChoice(false)}
+                      aria-label="No"
+                      className="rounded border border-sk-slate px-4 py-1 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white"
+                    >
+                      No
+                    </button>
+                  </>
+                ) : (
+                  (myChoice.options ?? []).map((opt) => (
+                    <button
+                      key={`choice-opt-${opt}`}
+                      type="button"
+                      onClick={() => handleResolveChoice(opt)}
+                      aria-label={choiceOptionLabel(myChoice.kind, opt)}
+                      className="rounded border-2 border-sk-red px-3 py-1 text-sm font-bold text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white"
+                    >
+                      {choiceOptionLabel(myChoice.kind, opt)}
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          ) : waitingForOpponentChoice ? (
+            <p className="text-sm text-sk-slate" aria-live="polite">
+              Waiting for opponent&apos;s choice…
+            </p>
           ) : (
             <p className="text-xs text-sk-slate" aria-live="polite">
               {selectionPrompt}
@@ -264,7 +376,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             <button
               type="button"
               onClick={handleDrawCard}
-              disabled={!isActive}
+              disabled={!isActive || choiceActive}
               aria-label="Draw a card"
               className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
             >
@@ -273,7 +385,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             <button
               type="button"
               onClick={handleBottomUp}
-              disabled={!isActive || bottomUpUsed || ownDeckCount > 10}
+              disabled={!isActive || choiceActive || bottomUpUsed || ownDeckCount > 10}
               aria-label="Move bottom card of deck to top"
               className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
             >
@@ -291,7 +403,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             <button
               type="button"
               onClick={handleBanishFromHand}
-              disabled={!isActive || selectedHandIndex === null}
+              disabled={!isActive || choiceActive || selectedHandIndex === null}
               aria-label="Banish selected hand card to banished pile"
               className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
             >
@@ -300,7 +412,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             <button
               type="button"
               onClick={handleEndTurn}
-              disabled={!isActive}
+              disabled={!isActive || choiceActive}
               aria-label="End turn"
               className="rounded border-2 border-sk-red px-3 py-1 text-sm font-bold disabled:opacity-50"
             >
@@ -343,7 +455,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
                   key={`own-hand-${i}-${label}`}
                   type="button"
                   onClick={() => handleSelectHandCard(i)}
-                  disabled={!isActive}
+                  disabled={!isActive || choiceActive}
                   aria-pressed={isSelected}
                   aria-label={`Your hand card ${i + 1}: ${label}${
                     isSelected ? ', selected' : ''
