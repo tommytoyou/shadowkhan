@@ -8,6 +8,7 @@
 // logic is touched; only the initial deal is test-controlled, exactly the
 // same category of thing DEV_MODE/DEV_TEST_HAND already does in game.ts.
 import { Client } from 'boardgame.io/client';
+import { Local } from 'boardgame.io/multiplayer';
 import { ShadowkhanGame } from '../game';
 import { CARD_BY_LABEL } from '../cards';
 import type { ActiveEffect, FieldCard, PendingChoice, ShadowkhanG } from '../state';
@@ -133,17 +134,51 @@ function buildG(spec: BoardPositionSpec): ShadowkhanG {
 }
 
 export interface TestGame {
-  /** The real boardgame.io client — dispatch real moves via client.moves.*. */
+  /** The real boardgame.io client, bound to player '0' — dispatch real moves
+   *  via client.moves.*. Every existing test uses only this and G(); nothing
+   *  about their calling code changes. */
   client: ReturnType<typeof Client<ShadowkhanG>>;
-  /** Convenience: client.getState().G, pre-typed. Re-reads live each call. */
+  /** Convenience: client.getState().G, pre-typed (player '0's playerView).
+   *  Re-reads live each call. */
   G: () => ShadowkhanG;
+  /** A SEPARATE, genuinely independent client bound to player '1', wired to
+   *  the SAME match as `client` via multiplayer: Local() (see below) — so a
+   *  test can dispatch moves AS player 1 (client1.moves.*) and read player
+   *  1's own playerView (G1()), through the real reducer and real move
+   *  validation exactly like `client`, not a bypass. Additive: no existing
+   *  test references this. */
+  client1: ReturnType<typeof Client<ShadowkhanG>>;
+  /** Convenience: client1.getState().G (player '1's playerView). */
+  G1: () => ShadowkhanG;
 }
 
+/** Local()'s own master registry (see boardgame.io's client/transport/local)
+ *  is keyed by the `game` object passed to Client — reference equality, not
+ *  matchID — so two clients only share a master if they're constructed with
+ *  the literal same `testGame` object, which is exactly what happens below
+ *  (both Client() calls close over the same local `testGame`). matchID
+ *  additionally scopes which MATCH within that shared master they join;
+ *  each createTestGame() call mints its own so unrelated tests never
+ *  collide, even though the master registry itself lives at module scope
+ *  for the whole test run. */
+let matchCounter = 0;
+
 /**
- * Builds a running ShadowkhanGame client seeded at an exact board position,
- * ready to dispatch real moves through the real reducer (random/events
- * plugins active, playerView applied on read). Game rule/ability code is
- * never touched — only the initial deal is replaced.
+ * Builds a running ShadowkhanGame client pair seeded at an exact board
+ * position, ready to dispatch real moves through the real reducer
+ * (random/events plugins active, playerView applied on read). Game
+ * rule/ability code is never touched — only the initial deal is replaced.
+ *
+ * Two clients, not one: player '0's client (`client`) is what every
+ * existing test already uses unchanged. player '1's client (`client1`) is
+ * new — a second Client(), bound to playerID '1', connected to the SAME
+ * LocalMaster as `client` via multiplayer: Local() and a shared matchID, so
+ * both observe and can mutate the SAME canonical game state, each strictly
+ * through their own playerView. This is boardgame.io's own documented
+ * pattern for simulating multiple players locally — not a parallel,
+ * test-only state channel. Move validation is untouched: client1 can only
+ * submit moves boardgame.io itself considers legal for player '1' right
+ * now, exactly as client can only move for player '0'.
  */
 export function createTestGame(spec: BoardPositionSpec): TestGame {
   const initialG = buildG(spec);
@@ -154,13 +189,25 @@ export function createTestGame(spec: BoardPositionSpec): TestGame {
     ...(spec.seed !== undefined ? { seed: spec.seed } : {}),
   };
 
+  const matchID = `test-${matchCounter++}`;
+
   const client = Client<ShadowkhanG>({
     game: testGame,
     numPlayers: 2,
     playerID: '0',
+    matchID,
+    multiplayer: Local(),
+  });
+  const client1 = Client<ShadowkhanG>({
+    game: testGame,
+    numPlayers: 2,
+    playerID: '1',
+    matchID,
+    multiplayer: Local(),
   });
 
   client.start();
+  client1.start();
 
   // boardgame.io's own default for a fresh 2-player game is ctx.currentPlayer
   // === '0'. To reach '1' we dispatch our own real `endTurn` move (not the
@@ -174,5 +221,7 @@ export function createTestGame(spec: BoardPositionSpec): TestGame {
   return {
     client,
     G: () => client.getState()!.G,
+    client1,
+    G1: () => client1.getState()!.G,
   };
 }

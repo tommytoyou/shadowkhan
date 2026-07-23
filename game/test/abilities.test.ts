@@ -2160,3 +2160,108 @@ describe('Guardian vs self-hook ordering', () => {
     expect(G().public.field['0'][1]?.label).toBe('Sk-29'); // guardian never consulted, untouched
   });
 });
+
+describe('createTestGame: two independent clients over one shared match', () => {
+  test('90. a move submitted as player 1 succeeds and mutates state correctly, visible to both clients', () => {
+    const { client, client1, G, G1 } = createTestGame({
+      players: {
+        '0': { field: [] },
+        '1': { hand: ['Sk-01'], field: [] },
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.playCard(0, 0);
+
+    // Public state — visible identically through EITHER client, proving
+    // both are genuinely watching the same canonical match, not two
+    // independent local games that merely started from the same spec.
+    expect(G1().public.field['1'][0]?.label).toBe('Sk-01');
+    expect(G().public.field['1'][0]?.label).toBe('Sk-01');
+    expect(G1().secret.hands['1']).toEqual([]);
+  });
+
+  test('91. a move submitted by the wrong player is rejected: move validation is intact, not bypassed', () => {
+    const { client, client1, G, G1 } = createTestGame({
+      players: {
+        '0': { hand: [], field: [] },
+        '1': { hand: ['Sk-01'], field: [] },
+      },
+      // currentPlayer defaults to '0' — it is NOT player 1's turn.
+    });
+
+    client1.moves.playCard(0, 0);
+
+    expect(G1().public.field['1'][0]).toBeNull(); // rejected — nothing placed
+    expect(G1().secret.hands['1']).toEqual(['Sk-01']); // card never left hand
+    expect(G().public.field['1'][0]).toBeNull(); // same rejection, seen from the other client
+  });
+
+  test("92. each player's playerView hides the other's secret hand and deck, verified from both sides", () => {
+    const { G, G1 } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-01'], deck: ['Sk-02'] },
+        '1': { hand: ['Sk-03'], deck: ['Sk-04'] },
+      },
+    });
+
+    expect(G().secret.hands['0']).toEqual(['Sk-01']);
+    expect(G().secret.decks['0']).toEqual(['Sk-02']);
+    expect(G().secret.hands['1']).toBeUndefined();
+    expect(G().secret.decks['1']).toBeUndefined();
+
+    expect(G1().secret.hands['1']).toEqual(['Sk-03']);
+    expect(G1().secret.decks['1']).toEqual(['Sk-04']);
+    expect(G1().secret.hands['0']).toBeUndefined();
+    expect(G1().secret.decks['0']).toBeUndefined();
+  });
+
+  // Re-testing Sk-30a with the OPPONENT actively removing the guarded card
+  // via their own move (Sk-05, "Remove one Battle Card from the field
+  // face-up") — the scenario the previous run's single-client harness could
+  // not reach. This revealed a genuine, PRE-EXISTING gap in game.ts, not
+  // something introduced by GUARDIAN_HOOKS: resolveChoice's own move body
+  // rejects unless `pending.pid === ctx.currentPlayer`, and boardgame.io's
+  // own base access control separately restricts move submission to
+  // ctx.currentPlayer only. Sk-05 is played on player 1's turn without any
+  // turn transition, so ctx.currentPlayer stays '1' throughout — but the
+  // guardian belongs to player 0 (pending.pid === '0'), and NEITHER player
+  // can resolve it: player 1 fails the pid check, player 0 fails
+  // boardgame.io's own turn-ownership check before the move body even runs.
+  // This is out of scope for this run (game logic is off-limits) — see the
+  // report. What CAN be honestly asserted, and is asserted below, is that
+  // the guardian hook itself fires correctly across players (GUARDIAN_HOOKS'
+  // own field scan and pid plumbing are not the problem); resolution is
+  // where it's blocked.
+  test('93. opponent-triggered guardian: the guard-confirm opens correctly for the DEFENDING player, but neither player can currently resolve it (known game-logic gap, not fixed this run)', () => {
+    const { client, client1, G, G1 } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', 'Sk-30', null], hand: ['Sk-01'] },
+        '1': { hand: ['Sk-05'] },
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.playCard(0, 0); // opponent plays Sk-05
+    client1.moves.resolveChoice(0); // targets Sk-15 (slot 0), not Sk-30 (slot 1)
+
+    // The guardian fires: GUARDIAN_HOOKS' field scan and pid plumbing work
+    // correctly across players, opening Sk-30's own confirm for its owner.
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.pid).toBe('0');
+    expect(pending?.sourceLabel).toBe('Sk-30');
+    expect(pending?.abilitySlot).toBe('guard-confirm');
+    expect(client.getState()?.ctx.currentPlayer).toBe('1'); // still player 1's turn
+
+    // Neither client can resolve it right now. Both attempts are silently
+    // rejected — state is provably unchanged either way.
+    client.moves.resolveChoice(true); // player 0 (the guardian's own owner): rejected by boardgame.io's own turn-ownership check
+    client1.moves.resolveChoice(true); // player 1 (the current player): rejected by resolveChoice's own pending.pid check
+
+    expect(G().public.pendingChoice).not.toBeNull(); // still stuck open
+    expect(G().public.pendingChoice?.abilitySlot).toBe('guard-confirm');
+    expect(G().public.field['0'][0]?.label).toBe('Sk-15'); // untouched — nothing resolved
+    expect(G().secret.hands['0']).toEqual(['Sk-01']); // cost never paid
+  });
+});
