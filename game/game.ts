@@ -8,6 +8,7 @@ import {
   modifyBp,
   interceptHandOrDeckAttack,
   resolvePendingChoice,
+  drawCardForPlayer,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -87,13 +88,10 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       if (bothReady) {
         const hand = G.secret.hands[pid];
         if (hand.length < MAX_HAND_SIZE) {
-          const deck = G.secret.decks[pid];
-          if (deck.length === 0) {
+          if (G.secret.decks[pid].length === 0) {
             G.public.loser = pid;
           } else {
-            const card = deck.shift()!;
-            hand.push(card);
-            syncCounts(G);
+            drawCardForPlayer(G, ctx, pid);
           }
         }
       }
@@ -114,13 +112,9 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       move: ({ G, ctx }) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
-        const hand = G.secret.hands[pid];
-        if (hand.length >= MAX_HAND_SIZE) return INVALID_MOVE;
-        const deck = G.secret.decks[pid];
-        if (deck.length === 0) return INVALID_MOVE;
-        const card = deck.shift()!;
-        hand.push(card);
-        syncCounts(G);
+        if (G.secret.hands[pid].length >= MAX_HAND_SIZE) return INVALID_MOVE;
+        if (G.secret.decks[pid].length === 0) return INVALID_MOVE;
+        drawCardForPlayer(G, ctx, pid);
       },
     },
 

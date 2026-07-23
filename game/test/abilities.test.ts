@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'vitest';
+import { Client } from 'boardgame.io/client';
 import { createTestGame } from './helpers';
+import { ShadowkhanGame } from '../game';
 
 describe('Sk-11 CHOSEN CONDUIT', () => {
   test('1. playing Sk-11 with two own Battle Cards opens an ownField choice listing both', () => {
@@ -475,5 +477,100 @@ describe('activateAbility guards', () => {
     client.moves.activateAbility(0); // already activated — must be a no-op
 
     expect(G()).toEqual(afterFirst);
+  });
+});
+
+describe('Sk-07b ACE IN THE HOLE (onDraw)', () => {
+  test('24. normal draw (deck still has cards after) opens a yesNo; answering Yes moves it to the bottom of the deck', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: [], deck: ['Sk-07', 'Sk-01', 'Sk-02'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.drawCard();
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('yesNo');
+    expect(pending?.sourceLabel).toBe('Sk-07');
+
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.hands['0']).toEqual([]);
+    expect(G().secret.decks['0']).toEqual(['Sk-01', 'Sk-02', 'Sk-07']);
+    expect(G().public.deckCounts['0']).toBe(3);
+    expect(G().public.handCounts['0']).toBe(0);
+  });
+
+  test('25. drawing it as the last card in the deck: branch a applies instead, resolves silently', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: [], deck: ['Sk-07'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.drawCard();
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.hands['0']).toEqual(['Sk-07']);
+    expect(G().public.deckCounts['0']).toBe(0);
+  });
+
+  test('26. drawCard fires onDraw exactly once; declining leaves the card in hand with no re-trigger', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: [], deck: ['Sk-07', 'Sk-01'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.drawCard();
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.abilitySlot).toBe('b-confirm');
+
+    client.moves.resolveChoice(false);
+
+    // No re-trigger: pendingChoice stays null, the card is simply in hand.
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.hands['0']).toEqual(['Sk-07']);
+    expect(G().public.deckCounts['0']).toBe(1);
+  });
+
+  test("27. deck search never leaks the opponent's secret hand/deck, during or after onDraw resolution", () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: [], deck: ['Sk-07', 'Sk-01', 'Sk-02'] },
+        '1': { field: [], hand: ['Sk-30'], deck: ['Sk-03', 'Sk-04'] },
+      },
+    });
+
+    client.moves.drawCard();
+
+    expect(G().public.pendingChoice?.kind).toBe('yesNo');
+    expect(G().secret.decks['1']).toBeUndefined();
+    expect(G().secret.hands['1']).toBeUndefined();
+
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.decks['1']).toBeUndefined();
+    expect(G().secret.hands['1']).toBeUndefined();
+    expect(G().secret.decks['0']).toEqual(['Sk-01', 'Sk-02', 'Sk-07']);
+  });
+
+  test('28. the opening-hand deal does not fire onDraw', () => {
+    // createTestGame swaps out setup() entirely (so tests can seed an exact
+    // board), which necessarily bypasses the real opening-hand deal. Boot
+    // the actual ShadowkhanGame here instead to exercise the real setup().
+    const realClient = Client({ game: ShadowkhanGame, numPlayers: 2, playerID: '0' });
+    realClient.start();
+
+    expect(realClient.getState()!.G.public.pendingChoice).toBeNull();
   });
 });

@@ -7,7 +7,8 @@ export type Trigger =
   | 'onBattleWin'
   | 'onRemoved'
   | 'onAttacked'
-  | 'onActivate';
+  | 'onActivate'
+  | 'onDraw';
 
 export interface AbilitySelf {
   pid: string;
@@ -196,6 +197,34 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
           .filter((i): i is number => i !== null);
         if (eligible.length === 0) return;
         openChoice(G, ctx, self, 'Sk-05', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-05']['a-target']);
+      },
+    },
+  ],
+
+  // Sk-07 ACE IN THE HOLE: two mutually exclusive onDraw branches, decided by
+  // whether this draw emptied the deck.
+  // effect a ("If you draw this card and it is your last card, you may
+  //   select 10 of your face-up removed cards, shuffle them, and add them to
+  //   your deck.") — read "last card" as the last card OF YOUR DECK, i.e.
+  //   deck.length === 0 immediately after this draw. Needs a genuine
+  //   multi-select (pick exactly 10 from an arbitrarily-sized removed pool),
+  //   which the single-answer pendingChoice/dispatchSearch machinery can't
+  //   express — left deferred rather than faking it with repeated prompts.
+  // effect b ("If you draw this card normally, you may place it at the
+  //   bottom of your deck...") — the complementary branch: deck still has
+  //   cards after this draw. Wired below. No search involved — the target is
+  //   always "the card that was just drawn" (self.slot, its hand index), so
+  //   this is a plain yesNo confirm, same shape as Sk-25a. CAVEAT: "You
+  //   cannot play other action cards this turn" is not modeled — no
+  //   per-turn lock state exists for action-card plays.
+  'Sk-07': [
+    {
+      slot: 'b',
+      trigger: 'onDraw',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        if (G.secret.decks[self.pid].length === 0) return; // branch a applies instead
+        openChoice(G, ctx, self, 'Sk-07', 'b-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-07']['b-confirm']);
       },
     },
   ],
@@ -848,6 +877,24 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
     },
   },
 
+  // Sk-07 ACE IN THE HOLE confirm step. Only reachable via the dispatcher in
+  // ABILITIES_BY_LABEL['Sk-07'] above.
+  'Sk-07': {
+    'b-confirm': {
+      needsChoice: true,
+      prompt: 'Ace In The Hole: place it at the bottom of your deck?',
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, _ctx, self, answer) => {
+        if (answer !== true) return;
+        const hand = G.secret.hands[self.pid];
+        if (self.slot < 0 || self.slot >= hand.length) return;
+        const [label] = hand.splice(self.slot, 1);
+        G.secret.decks[self.pid].push(label);
+      },
+    },
+  },
+
   // Sk-05 DIVINE SKY STRIKE target step. Only reachable via the dispatcher in
   // ABILITIES_BY_LABEL['Sk-05'] above.
   'Sk-05': {
@@ -1045,6 +1092,83 @@ export function fireTrigger(
   syncCounts(G);
 }
 
+// ---------------------------------------------------------------------------
+// Draw trigger. A card that's just been drawn is hand-resident, not
+// field-resident — fireTrigger's very first line (`G.public.field[pid][slot]`)
+// would immediately bail for it, so it can't be reused as-is. fireOnDraw is
+// the parallel dispatcher: same two-pass shape (auto Ability entries, then a
+// trigger-bound ChoiceAbility with the same willHaveLegalOutcome look-ahead),
+// just sourced from G.secret.hands[pid][handIndex] instead of the field.
+//
+// For an onDraw ability's self context, self.slot carries the HAND INDEX of
+// the drawn card — the one trigger where that's true; every other trigger
+// keeps self.slot meaning field slot. This lets onDraw abilities reuse
+// AbilitySelf/ChoiceAbility/openChoice/dispatchSearch/resolvePendingChoice
+// completely unchanged (resolvePendingChoice already reconstructs self as
+// {pid, slot: pending.sourceSlot}, which is exactly the hand index here).
+//
+// drawCardForPlayer is the single choke point every genuine draw goes
+// through (the drawCard move and turn.onBegin's auto-draw — see game.ts).
+// It is NOT used by the opening-hand deal (setup() mutates the raw deck/hand
+// arrays directly, before G exists, entirely bypassing this function) and
+// NOT used by moveDeckCardToHand (Sk-20b/23a/24a all say "add ... to your
+// hand", never "draw"). Each call fires onDraw exactly once for exactly the
+// card it just drew; there is no shared "currently drawing" state for a
+// nested draw (e.g. a future "draw an additional card" ability) to
+// collide with, so recursion is safe by construction — a nested call fires
+// onDraw for its own, different card, and never replays the outer draw.
+function fireOnDraw(
+  G: ShadowkhanG,
+  ctx: unknown,
+  pid: string,
+  handIndex: number
+): void {
+  const label = G.secret.hands[pid][handIndex];
+  if (!label) return;
+  const self: AbilitySelf = { pid, slot: handIndex };
+
+  const abilities = ABILITIES_BY_LABEL[label];
+  if (abilities) {
+    for (const ability of abilities) {
+      if (ability.auto && ability.trigger === 'onDraw') {
+        ability.run({ G, ctx, self });
+      }
+    }
+  }
+
+  if (!G.public.pendingChoice) {
+    const choices = CHOICE_ABILITIES_BY_LABEL[label];
+    if (choices) {
+      for (const [key, choice] of Object.entries(choices)) {
+        if (choice.trigger === 'onDraw') {
+          if (willHaveLegalOutcome(G, ctx, self, label, choice)) {
+            openChoice(G, ctx, self, label, key, choice);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  syncCounts(G);
+}
+
+/** Shifts the top card of owner's deck into their hand and fires onDraw for
+ *  it. The single choke point for a genuine draw — see the block comment
+ *  above for what does and doesn't route through here. */
+export function drawCardForPlayer(
+  G: ShadowkhanG,
+  ctx: unknown,
+  pid: string
+): void {
+  const deck = G.secret.decks[pid];
+  if (deck.length === 0) return;
+  const hand = G.secret.hands[pid];
+  const label = deck.shift()!;
+  const handIndex = hand.push(label) - 1;
+  fireOnDraw(G, ctx, pid, handIndex);
+}
+
 /** Resolves G.public.pendingChoice with `answer`. Returns false (and leaves
  *  pendingChoice untouched) if there's nothing pending or the answer isn't a
  *  legal option, so the move layer can turn that into INVALID_MOVE. */
@@ -1121,8 +1245,7 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which removed face-up card to return, and which field slot to return it to.' },
   { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
   { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Select hand/deck cards to remove equal to the selected card's BP; also needs a delayed 'start of next turn' summon not currently modeled." },
-  { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select 10 of your face-up removed cards' — optional, multi-select." },
-  { label: 'Sk-07', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you may place it at the bottom of your deck' — optional." },
+  { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "onDraw now exists and correctly identifies this branch (deck empty after the draw), but 'select 10 of your face-up removed cards' is a genuine multi-select — the single-answer pendingChoice/dispatchSearch machinery has no way to express picking 10 at once." },
   { label: 'Sk-08', slot: 'a', classification: 'GATE', reason: "Play requirement not enforced. The named-card search over the deck (one of 3 names) is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, but 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top. Beyond a single search + apply." },
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: 'Only usable on Shadow Ghost — Power Cards have no attach-target parameter in playCard yet.' },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-09's attach targeting, which isn't wired." },
@@ -1145,8 +1268,8 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-25', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you can add one face-up removed Action Card...' — optional, selects from the removed pool." },
   { label: 'Sk-26', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can select one Battle Card...place it under this card' — optional target selection; also needs a new 'cards attached under this card' mechanic." },
   { label: 'Sk-26', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Depends entirely on Sk-26a's 'place under this card' mechanic, which is deferred — nothing will ever be attached to return." },
-  { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Delayed 'drawn within next five turns' payoff needs a new onDraw-style trigger and a per-instance countdown attached to a specific deck card — not modeled." },
-  { label: 'Sk-28', slot: 'c', classification: 'NOT_IMPLEMENTED', reason: 'Same missing infrastructure as slot b (the non-draw branch of the same delayed payoff).' },
+  { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },
+  { label: 'Sk-28', slot: 'c', classification: 'NOT_IMPLEMENTED', reason: 'Same missing infrastructure as slot b — and this branch is a turn-count timeout, not a draw event, so onDraw does not apply to it at all.' },
   { label: 'Sk-29', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can remove this card on the field instead' — optional replacement." },
   { label: 'Sk-30', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can add it to your deck instead...' — optional replacement." },
 ];
