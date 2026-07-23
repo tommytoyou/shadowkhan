@@ -32,6 +32,9 @@ export interface PlayerPositionSpec {
   deck?: string[];
   /** G.public.turnsTaken for this player. Defaults to 0. */
   turnsTaken?: number;
+  /** G.public.banished (face-up removed pile) for this player, by label.
+   *  Defaults to []. */
+  banished?: string[];
 }
 
 export interface BoardPositionSpec {
@@ -92,7 +95,7 @@ function buildG(spec: BoardPositionSpec): ShadowkhanG {
       deckCounts: { '0': deck0.length, '1': deck1.length },
       handCounts: { '0': hand0.length, '1': hand1.length },
       field: { '0': buildField(p0.field), '1': buildField(p1.field) },
-      banished: { '0': [], '1': [] },
+      banished: { '0': [...(p0.banished ?? [])], '1': [...(p1.banished ?? [])] },
       banishedFaceDown: { '0': 0, '1': 0 },
       turnsTaken: { '0': p0.turnsTaken ?? 0, '1': p1.turnsTaken ?? 0 },
       bottomUpUsed: { '0': false, '1': false },

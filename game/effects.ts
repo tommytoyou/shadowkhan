@@ -148,6 +148,80 @@ export function moveDeckCardToHand(
 }
 
 // ---------------------------------------------------------------------------
+// Play-legality gates. Some cards print "you can only play this card if...":
+// a condition on game state that must hold BEFORE the card is even allowed
+// onto the field, distinct from what the card's ability does once it's
+// there. One registry, keyed by label, mirroring the ABILITIES_BY_LABEL /
+// CHOICE_ABILITIES_BY_LABEL shape — playCard calls the single isPlayLegal
+// check below rather than branching per card. A label with no entry plays
+// exactly as it always has (isPlayLegal returns true by default).
+// ---------------------------------------------------------------------------
+
+export interface PlayGate {
+  /** Printed slot letter the condition lives on, for traceability against
+   *  cards.ts / DEFERRED_ABILITIES — not read by isPlayLegal itself. */
+  slot: 'a' | 'b' | 'c' | 'd';
+  check: (G: ShadowkhanG, pid: string) => boolean;
+}
+
+const PLAY_GATES: Record<string, PlayGate> = {
+  // Sk-03 ARRIVAL OF DOOM: "This card can only be played when you have Sage
+  // of Dark Omen on the field."
+  'Sk-03': {
+    slot: 'a',
+    check: (G, pid) =>
+      G.public.field[pid].some((c) => c && CARD_BY_LABEL[c.label]?.name === 'SAGE OF DARK OMEN'),
+  },
+
+  // Sk-08 A SINISTER ALLIANCE: "You can only play this card if you have at
+  // least one Blazing Sky Goblin, Sand Squid, or Battle Shock Scorpion on
+  // your field." (The rest of that sentence — playing one of those three
+  // from your deck — is a separate, still-deferred search+play effect; this
+  // gate only covers whether Sk-08 itself may be played.)
+  'Sk-08': {
+    slot: 'a',
+    check: (G, pid) => {
+      const allies = ['BLAZING SKY GOBLIN', 'SAND SQUID', 'BATTLE SHOCK SCORPION'];
+      return G.public.field[pid].some(
+        (c) => c && allies.includes(CARD_BY_LABEL[c.label]?.name ?? '')
+      );
+    },
+  },
+
+  // Sk-10 CYCLO OPTIC BEAM: "This card can only be played while you have a
+  // One Eyed Mechanical Monster on the field."
+  'Sk-10': {
+    slot: 'a',
+    check: (G, pid) =>
+      G.public.field[pid].some((c) => c && CARD_BY_LABEL[c.label]?.name === 'ONE EYED MECHANICAL MONSTER'),
+  },
+
+  // Sk-16 WAR DRAGON: "You can only play this card if you have at least two
+  // BP 7 or BP 8 cards removed, and your opponent has at least one BP 7 or
+  // BP 8 card removed." Reads the (face-up) banished piles, not the field.
+  'Sk-16': {
+    slot: 'a',
+    check: (G, pid) => {
+      const opp = pid === '0' ? '1' : '0';
+      const isSevenOrEight = (label: string) => {
+        const bp = CARD_BY_LABEL[label]?.bp;
+        return bp === 7 || bp === 8;
+      };
+      const ownCount = G.public.banished[pid].filter(isSevenOrEight).length;
+      const oppCount = G.public.banished[opp].filter(isSevenOrEight).length;
+      return ownCount >= 2 && oppCount >= 1;
+    },
+  },
+};
+
+/** True if `pid` is allowed to play `label` right now — i.e. no gate entry,
+ *  or its condition currently holds. playCard's single legality check. */
+export function isPlayLegal(G: ShadowkhanG, pid: string, label: string): boolean {
+  const gate = PLAY_GATES[label];
+  return !gate || gate.check(G, pid);
+}
+
+// ---------------------------------------------------------------------------
 // Ability data — the executable layer. Keyed by card label, kept separate
 // from cards.ts so the human-readable `effects` text there stays untouched.
 // Only fully automatic (no player choice, no target selection) abilities are
@@ -1240,22 +1314,19 @@ export interface DeferredAbility {
 export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
   { label: 'Sk-02', slot: 'a', classification: 'NOT_IMPLEMENTED', reason: 'Implemented, but outside the Ability/fireTrigger system — see interceptHandOrDeckAttack.' },
-  { label: 'Sk-03', slot: 'a', classification: 'GATE', reason: 'Play requirement (Sage of Dark Omen on field) not enforced — playCard has no per-card legality gates.' },
   { label: 'Sk-03', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Two independent selections, not one search: an own-field removal target (no search involved), plus a named search for War Dragon across TWO zones (face-up removed pile, which is public, OR the deck, which is secret) — dispatchSearch only takes a single zone, and folding the public removed-pile half in would silently misrepresent the other half as covered. Deferred as a whole rather than wiring the deck-only half and dropping the removed-pile branch." },
   { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which removed face-up card to return, and which field slot to return it to.' },
   { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
   { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Select hand/deck cards to remove equal to the selected card's BP; also needs a delayed 'start of next turn' summon not currently modeled." },
   { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "onDraw now exists and correctly identifies this branch (deck empty after the draw), but 'select 10 of your face-up removed cards' is a genuine multi-select — the single-answer pendingChoice/dispatchSearch machinery has no way to express picking 10 at once." },
-  { label: 'Sk-08', slot: 'a', classification: 'GATE', reason: "Play requirement not enforced. The named-card search over the deck (one of 3 names) is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, but 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top. Beyond a single search + apply." },
-  { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: 'Only usable on Shadow Ghost — Power Cards have no attach-target parameter in playCard yet.' },
+  { label: 'Sk-08', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The play-gate (own field has Blazing Sky Goblin/Sand Squid/Battle Shock Scorpion) is now enforced via PLAY_GATES/isPlayLegal. Still unwired: 'From your deck, you may play one of the above-mentioned cards that is not already on your field' — the named-card search over the deck is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, and 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top." },
+  { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: "Only usable on Shadow Ghost — this is a targeting/attach requirement (which field card the Power Card enhances), not a boolean state condition, so it doesn't fit PLAY_GATES's check(G, pid) => boolean shape. playCard has no attach-target parameter for Power Cards to express 'only usable on card X' at all. Excluded from this pass rather than approximated as 'Shadow Ghost merely present somewhere on the field', which would misrepresent the attachment relationship." },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-09's attach targeting, which isn't wired." },
-  { label: 'Sk-10', slot: 'a', classification: 'GATE', reason: 'Play requirement (One Eyed Mechanical Monster on field) not enforced.' },
   { label: 'Sk-12', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select target opponent Battle Card to lock.' },
   { label: 'Sk-12', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-12a's target selection." },
   { label: 'Sk-12', slot: 'c', classification: 'NEEDS_CHOICE', reason: 'Duration clause tied to the deferred target selection above.' },
   { label: 'Sk-15', slot: 'a', classification: 'NOT_IMPLEMENTED', reason: 'No current ability performs non-battle field-card removal against a specific opponent card to guard against — nothing to intercept yet.' },
   { label: 'Sk-15', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you may return it to your hand instead' — optional replacement." },
-  { label: 'Sk-16', slot: 'a', classification: 'GATE', reason: 'Play requirement (removed-card counts on both sides) not enforced.' },
   { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },
   { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },
   { label: 'Sk-18', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select 1 of your removed cards' to copy." },

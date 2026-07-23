@@ -574,3 +574,148 @@ describe('Sk-07b ACE IN THE HOLE (onDraw)', () => {
     expect(realClient.getState()!.G.public.pendingChoice).toBeNull();
   });
 });
+
+describe('Sk-03a play gate (Sage of Dark Omen on field)', () => {
+  test('29. condition met: Sk-03 plays normally', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20'], hand: ['Sk-03'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+
+    expect(G().public.field['0'][1]?.label).toBe('Sk-03');
+    expect(G().secret.hands['0']).toEqual([]);
+  });
+
+  test('30. condition not met: rejected, hand and field unchanged, no pendingChoice', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-03'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    expect(G().public.field['0']).toEqual([null, null, null]);
+    expect(G().secret.hands['0']).toEqual(['Sk-03']);
+    expect(G().public.pendingChoice).toBeNull();
+  });
+});
+
+describe('Sk-08a play gate (an ally on field)', () => {
+  test('31. condition met: Sk-08 plays normally', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21'], hand: ['Sk-08'] }, // Sk-21 = Sand Squid
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+
+    expect(G().public.field['0'][1]?.label).toBe('Sk-08');
+    expect(G().secret.hands['0']).toEqual([]);
+  });
+
+  test('32. condition not met: rejected, hand and field unchanged, no pendingChoice', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-27'], hand: ['Sk-08'] }, // Sk-27 is not one of the three allies
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+
+    expect(G().public.field['0'][1]).toBeNull();
+    expect(G().secret.hands['0']).toEqual(['Sk-08']);
+    expect(G().public.pendingChoice).toBeNull();
+  });
+});
+
+describe('Sk-10a play gate (One Eyed Mechanical Monster on field)', () => {
+  test('33. condition met: Sk-10 plays normally and its ability fires', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], hand: ['Sk-10'] },
+        '1': { field: ['Sk-29'] }, // BP 4, eligible (<=7)
+      },
+    });
+
+    client.moves.playCard(0, 1);
+
+    expect(G().public.field['0'][1]?.label).toBe('Sk-10');
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('opponentField');
+    expect(pending?.options).toEqual([0]);
+  });
+
+  test('34. condition not met: rejected, hand and field unchanged, no pendingChoice', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-10'] },
+        '1': { field: ['Sk-29'] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    expect(G().public.field['0']).toEqual([null, null, null]);
+    expect(G().secret.hands['0']).toEqual(['Sk-10']);
+    expect(G().public.pendingChoice).toBeNull();
+  });
+});
+
+describe('Sk-16a play gate (removed-card BP thresholds on both sides)', () => {
+  test('35. condition met: Sk-16 plays normally and its ability fires', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-16'], banished: ['Sk-14', 'Sk-15'] }, // BP 8, BP 7 — two
+        '1': { field: [], banished: ['Sk-14'] }, // BP 8 — at least one
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    const card = G().public.field['0'][0];
+    expect(card?.label).toBe('Sk-16');
+    expect(card?.protectedFromBattleCardRemoval).toBe(true);
+    expect(G().secret.hands['0']).toEqual([]);
+  });
+
+  test('36. condition not met (opponent has no qualifying removed card): rejected, hand and field unchanged, no pendingChoice', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-16'], banished: ['Sk-14', 'Sk-15'] },
+        '1': { field: [], banished: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    expect(G().public.field['0']).toEqual([null, null, null]);
+    expect(G().secret.hands['0']).toEqual(['Sk-16']);
+    expect(G().public.pendingChoice).toBeNull();
+  });
+});
+
+describe('play-legality gate: ungated cards unaffected', () => {
+  test('37. a card with no PLAY_GATES entry plays exactly as before', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-27'] }, // Crimson She-Knight — no gate
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    expect(G().public.field['0'][0]?.label).toBe('Sk-27');
+    expect(G().secret.hands['0']).toEqual([]);
+  });
+});

@@ -9,6 +9,7 @@ import {
   interceptHandOrDeckAttack,
   resolvePendingChoice,
   drawCardForPlayer,
+  isPlayLegal,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -131,6 +132,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const label = hand[handIndex];
         const card = CARD_BY_LABEL[label];
         if (!card) return INVALID_MOVE;
+        if (!isPlayLegal(G, pid, label)) return INVALID_MOVE;
 
         hand.splice(handIndex, 1);
         G.public.field[pid][slot] = {
