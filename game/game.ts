@@ -10,6 +10,11 @@ import {
   resolvePendingChoice,
   drawCardForPlayer,
   isPlayLegal,
+  removeFieldCard,
+  removeFromOpponentHand,
+  removeOpponentDeckTop,
+  removeOwnDeckTopFaceDown,
+  discardOwnHandCard,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -165,10 +170,10 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         if (attacker.currentBp > defender.currentBp) {
           if (!defender.protectedFromBattleCardRemoval) {
-            fireTrigger(G, ctx, 'onRemoved', { pid: opp, slot: theirSlot });
-            G.public.banished[opp].push(defender.label);
-            G.public.field[opp][theirSlot] = null;
-            fireTrigger(G, ctx, 'onBattleWin', { pid, slot: mySlot });
+            removeFieldCard(G, ctx, opp, theirSlot, 'battle', {
+              fireOnRemoved: true,
+              afterRemoved: (G2, ctx2) => fireTrigger(G2, ctx2, 'onBattleWin', { pid, slot: mySlot }),
+            });
           }
         } else if (attacker.currentBp < defender.currentBp) {
           if (G.public.rulesOfEngagementActive) {
@@ -177,25 +182,15 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
             // attacker; the defender is only removed once its BP hits zero.
             modifyBp(defender, -attacker.currentBp);
             if (defender.currentBp <= 0 && !defender.protectedFromBattleCardRemoval) {
-              fireTrigger(G, ctx, 'onRemoved', { pid: opp, slot: theirSlot });
-              G.public.banished[opp].push(defender.label);
-              G.public.field[opp][theirSlot] = null;
+              removeFieldCard(G, ctx, opp, theirSlot, 'battle', { fireOnRemoved: true });
             }
           } else if (!attacker.protectedFromBattleCardRemoval) {
-            fireTrigger(G, ctx, 'onRemoved', { pid, slot: mySlot });
-            G.public.banished[pid].push(attacker.label);
-            G.public.field[pid][mySlot] = null;
+            removeFieldCard(G, ctx, pid, mySlot, 'battle', { fireOnRemoved: true });
           }
         } else {
           // Shockwave: both lose top deck card face-down
-          if (G.secret.decks[pid].length > 0) {
-            G.secret.decks[pid].shift();
-            G.public.banishedFaceDown[pid]++;
-          }
-          if (G.secret.decks[opp].length > 0) {
-            G.secret.decks[opp].shift();
-            G.public.banishedFaceDown[opp]++;
-          }
+          removeOwnDeckTopFaceDown(G, pid);
+          removeOwnDeckTopFaceDown(G, opp);
           syncCounts(G);
         }
       },
@@ -223,12 +218,11 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         G.public.attackedThisTurn = true;
 
         const targetLabel = oppHand[theirHandIndex];
-        if (interceptHandOrDeckAttack(G, targetLabel, pid, mySlot)) {
+        if (interceptHandOrDeckAttack(G, ctx, targetLabel, pid, mySlot)) {
           return;
         }
 
-        const removed = oppHand.splice(theirHandIndex, 1)[0];
-        G.public.banished[opp].push(removed);
+        removeFromOpponentHand(G, opp, theirHandIndex);
         syncCounts(G);
       },
     },
@@ -254,8 +248,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         // random.Die(n) returns 1..n inclusive — subtract 1 for a 0-based index.
         const idx = random.Die(oppHand.length) - 1;
-        const [removed] = oppHand.splice(idx, 1);
-        G.public.banished[opp].push(removed);
+        removeFromOpponentHand(G, opp, idx);
         syncCounts(G);
       },
     },
@@ -279,12 +272,11 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         G.public.attackedThisTurn = true;
 
         const targetLabel = G.secret.decks[opp][0];
-        if (interceptHandOrDeckAttack(G, targetLabel, pid, mySlot)) {
+        if (interceptHandOrDeckAttack(G, ctx, targetLabel, pid, mySlot)) {
           return;
         }
 
-        const removed = G.secret.decks[opp].shift()!;
-        G.public.banished[opp].push(removed);
+        removeOpponentDeckTop(G, opp);
         syncCounts(G);
       },
     },
@@ -313,11 +305,9 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       move: ({ G, ctx }, handIndex: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
-        const hand = G.secret.hands[pid];
-        if (handIndex < 0 || handIndex >= hand.length) return INVALID_MOVE;
+        if (handIndex < 0 || handIndex >= G.secret.hands[pid].length) return INVALID_MOVE;
 
-        const [label] = hand.splice(handIndex, 1);
-        G.public.banished[pid].push(label);
+        discardOwnHandCard(G, pid, handIndex);
         syncCounts(G);
       },
     },

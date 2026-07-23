@@ -719,3 +719,245 @@ describe('play-legality gate: ungated cards unaffected', () => {
     expect(G().secret.hands['0']).toEqual([]);
   });
 });
+
+describe('Sk-15b SHADOW GHOST (removal replacement)', () => {
+  // resolveChoice can only be answered by pendingChoice.pid, and it's the
+  // OWNER of the threatened card who decides whether to use the
+  // replacement — not the attacker. Our single test client is always
+  // playerID '0', so these use the "attacker loses" battle branch (player
+  // 0's own Sk-15 attacks and loses) rather than player 0 attacking into a
+  // defender it doesn't own, which would open a choice only player 1 could
+  // answer.
+  test('38. removed by battle: hook fires; answering Yes returns it to hand instead of banishing it', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15'], turnsTaken: 1 }, // BP 7 attacker — will lose
+        '1': { field: ['Sk-14'] }, // BP 8 defender
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('yesNo');
+    expect(pending?.sourceLabel).toBe('Sk-15');
+    // Nothing has happened to the card yet — it's still on the field.
+    expect(G().public.field['0'][0]?.label).toBe('Sk-15');
+
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).not.toContain('Sk-15');
+    expect(G().public.handCounts['0']).toBe(1);
+    expect(G().secret.hands['0']).toEqual(['Sk-15']);
+  });
+
+  test('39. declining Yes: normal removal proceeds (banished)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15'], turnsTaken: 1 },
+        '1': { field: ['Sk-14'] },
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+    client.moves.resolveChoice(false);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-15');
+  });
+
+  test("40. no-trigger case: removed by an ability (not battle) — hook does not apply, removal proceeds normally", () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-05'] },
+        '1': { field: ['Sk-15'] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-05 DIVINE SKY STRIKE — ability removal, cause 'ability'
+
+    const pending = G().public.pendingChoice;
+    expect(pending?.sourceLabel).toBe('Sk-05'); // Sk-05's own target choice, not Sk-15's hook
+    client.moves.resolveChoice(0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-15');
+  });
+});
+
+describe('Sk-19a THE HEADLESS HORSEMAN (removal replacement, once only)', () => {
+  test('41. removed by battle: hook fires; answering Yes keeps it on the field and marks the once-only use', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-19'], turnsTaken: 1 }, // BP 5 attacker — will lose
+        '1': { field: ['Sk-14'] }, // BP 8 defender
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    const pending = G().public.pendingChoice;
+    expect(pending?.kind).toBe('yesNo');
+    expect(pending?.sourceLabel).toBe('Sk-19');
+
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-19');
+    expect(G().public.field['0'][0]?.replacementUsed).toBe(true);
+    expect(G().public.banished['0']).not.toContain('Sk-19');
+  });
+
+  test('42. declining Yes: normal removal proceeds (banished)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-19'], turnsTaken: 1 },
+        '1': { field: ['Sk-14'] },
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+    client.moves.resolveChoice(false);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-19');
+  });
+
+  test('43. no-trigger case: once-only use already spent — removal proceeds normally, no prompt', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], turnsTaken: 1 },
+        '1': { field: [{ label: 'Sk-19', replacementUsed: true }] },
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-19');
+  });
+});
+
+describe('Sk-25b BATTLE SHOCK SCORPION (removal replacement, hand cost)', () => {
+  test('44. removed by battle with an Action Card in hand: hook fires; Yes pays the cost face down and survives', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-25'], hand: ['Sk-08'], turnsTaken: 1 }, // Sk-08 = an Action Card
+        '1': { field: ['Sk-16'] }, // BP 9 — Sk-25 (BP 6) loses as attacker
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    const pending = G().public.pendingChoice;
+    expect(pending?.kind).toBe('yesNo');
+    expect(pending?.sourceLabel).toBe('Sk-25');
+
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-25');
+    expect(G().public.banished['0']).not.toContain('Sk-25');
+    expect(G().public.banished['0']).not.toContain('Sk-08'); // paid face down, label never revealed
+    expect(G().public.handCounts['0']).toBe(0);
+    expect(G().public.banishedFaceDown['0']).toBe(1);
+  });
+
+  test('45. declining Yes: normal removal proceeds (banished)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-25'], hand: ['Sk-08'], turnsTaken: 1 },
+        '1': { field: ['Sk-16'] },
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+    client.moves.resolveChoice(false);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-25');
+  });
+
+  test('46. no-trigger case: no Action Card in hand to pay with — removal proceeds normally, no prompt', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-25'], hand: [], turnsTaken: 1 },
+        '1': { field: ['Sk-16'] },
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-25');
+  });
+});
+
+describe('removal funneling: cross-cutting regressions', () => {
+  test('47. onRemoved still fires exactly once on an ordinary battle-loss removal', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], turnsTaken: 1, deck: ['Sk-01', 'Sk-02', 'Sk-03'] }, // BP 8 attacker
+        '1': { field: [{ label: 'Sk-17', turnsOnField: 2 }] }, // BP 3, no gate/hook — onRemoved removes 2 of the OPPONENT's (attacker's) top deck cards
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    // No hook on Sk-17 — this must complete synchronously, no pendingChoice.
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-17');
+    // onRemoved fired exactly once: exactly 2 cards removed (turnsOnField),
+    // not 0 (never fired) or 4 (fired twice).
+    expect(G().secret.decks['0']).toEqual(['Sk-03']);
+    expect(G().public.banished['0']).toEqual(expect.arrayContaining(['Sk-01', 'Sk-02']));
+    expect(G().public.banished['0']).toHaveLength(2);
+  });
+
+  test('48. Shockwave tie still removes from both decks face down; neither field card is removed', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-27'], deck: ['Sk-01', 'Sk-02'], turnsTaken: 1 }, // BP 5
+        '1': { field: ['Sk-19'], deck: ['Sk-03', 'Sk-04'] }, // BP 5 — tie
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-27');
+    expect(G().public.field['1'][0]?.label).toBe('Sk-19');
+    expect(G().public.deckCounts['0']).toBe(1);
+    expect(G().public.deckCounts['1']).toBe(1);
+    expect(G().public.banishedFaceDown['0']).toBe(1);
+    expect(G().public.banishedFaceDown['1']).toBe(1);
+    // Face down: no label revealed into the public banished pile.
+    expect(G().public.banished['0']).toEqual([]);
+    expect(G().public.banished['1']).toEqual([]);
+  });
+
+  test('49. Sk-16 protectedFromBattleCardRemoval still blocks removal exactly as before', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], turnsTaken: 1 }, // BP 8
+        '1': { field: [{ label: 'Sk-16', currentBp: 3, protectedFromBattleCardRemoval: true }] },
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]?.label).toBe('Sk-16');
+    expect(G().public.banished['1']).not.toContain('Sk-16');
+  });
+});

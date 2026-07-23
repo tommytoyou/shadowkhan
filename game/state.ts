@@ -11,6 +11,9 @@ export interface FieldCard {
   /** true once activateAbility has fired this card's onActivate trigger —
    *  enforces once-per-card activation without a new global flag. */
   activated?: boolean;
+  /** true once this card has used up a one-time removal-replacement effect
+   *  (e.g. The Headless Horseman's "once, remain on the field instead"). */
+  replacementUsed?: boolean;
 }
 
 export type PendingChoiceKind =

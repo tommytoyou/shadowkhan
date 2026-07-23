@@ -18,7 +18,7 @@ export type PlayerID = '0' | '1';
  *  for finer control (custom currentBp / flags), or null for an empty slot. */
 export type FieldSlotSpec =
   | string
-  | (Partial<Pick<FieldCard, 'currentBp' | 'canAttack' | 'protectedFromBattleCardRemoval' | 'turnsOnField'>> & {
+  | (Partial<Pick<FieldCard, 'currentBp' | 'canAttack' | 'protectedFromBattleCardRemoval' | 'turnsOnField' | 'replacementUsed'>> & {
       label: string;
     })
   | null;
@@ -66,6 +66,9 @@ function toFieldCard(spec: FieldSlotSpec): FieldCard | null {
   if (isObj && spec.canAttack !== undefined) card.canAttack = spec.canAttack;
   if (isObj && spec.protectedFromBattleCardRemoval !== undefined) {
     card.protectedFromBattleCardRemoval = spec.protectedFromBattleCardRemoval;
+  }
+  if (isObj && spec.replacementUsed !== undefined) {
+    card.replacementUsed = spec.replacementUsed;
   }
   return card;
 }
