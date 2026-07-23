@@ -2219,22 +2219,18 @@ describe('createTestGame: two independent clients over one shared match', () => 
   // Re-testing Sk-30a with the OPPONENT actively removing the guarded card
   // via their own move (Sk-05, "Remove one Battle Card from the field
   // face-up") — the scenario the previous run's single-client harness could
-  // not reach. This revealed a genuine, PRE-EXISTING gap in game.ts, not
-  // something introduced by GUARDIAN_HOOKS: resolveChoice's own move body
-  // rejects unless `pending.pid === ctx.currentPlayer`, and boardgame.io's
-  // own base access control separately restricts move submission to
-  // ctx.currentPlayer only. Sk-05 is played on player 1's turn without any
-  // turn transition, so ctx.currentPlayer stays '1' throughout — but the
-  // guardian belongs to player 0 (pending.pid === '0'), and NEITHER player
-  // can resolve it: player 1 fails the pid check, player 0 fails
-  // boardgame.io's own turn-ownership check before the move body even runs.
-  // This is out of scope for this run (game logic is off-limits) — see the
-  // report. What CAN be honestly asserted, and is asserted below, is that
-  // the guardian hook itself fires correctly across players (GUARDIAN_HOOKS'
-  // own field scan and pid plumbing are not the problem); resolution is
-  // where it's blocked.
-  test('93. opponent-triggered guardian: the guard-confirm opens correctly for the DEFENDING player, but neither player can currently resolve it (known game-logic gap, not fixed this run)', () => {
-    const { client, client1, G, G1 } = createTestGame({
+  // not reach.
+  //
+  // CHANGED from the previous run: this test previously asserted that
+  // NEITHER player could resolve the guardian's own confirm — a real,
+  // pre-existing gap (pending.pid === '0' the defender, ctx.currentPlayer
+  // stays '1' the attacker throughout, since nothing ends their turn). That
+  // gap is now fixed (see syncActivePlayersToPendingChoice in effects.ts and
+  // resolveChoice in game.ts), so this test is rewritten to assert the
+  // FIXED behavior — the defender resolves successfully — rather than
+  // continuing to assert the stuck state that no longer occurs.
+  test('93. opponent-triggered guardian: the DEFENDING player resolves it, pays the cost, and the redirect happens, even though the ATTACKER still holds the turn', () => {
+    const { client, client1, G } = createTestGame({
       players: {
         '0': { field: ['Sk-15', 'Sk-30', null], hand: ['Sk-01'] },
         '1': { hand: ['Sk-05'] },
@@ -2252,16 +2248,148 @@ describe('createTestGame: two independent clients over one shared match', () => 
     expect(pending?.pid).toBe('0');
     expect(pending?.sourceLabel).toBe('Sk-30');
     expect(pending?.abilitySlot).toBe('guard-confirm');
-    expect(client.getState()?.ctx.currentPlayer).toBe('1'); // still player 1's turn
+    expect(client.getState()?.ctx.currentPlayer).toBe('1'); // still player 1's turn — untouched
 
-    // Neither client can resolve it right now. Both attempts are silently
-    // rejected — state is provably unchanged either way.
-    client.moves.resolveChoice(true); // player 0 (the guardian's own owner): rejected by boardgame.io's own turn-ownership check
-    client1.moves.resolveChoice(true); // player 1 (the current player): rejected by resolveChoice's own pending.pid check
+    client.moves.resolveChoice(true); // player 0, the guardian's own owner, resolves it
 
-    expect(G().public.pendingChoice).not.toBeNull(); // still stuck open
-    expect(G().public.pendingChoice?.abilitySlot).toBe('guard-confirm');
-    expect(G().public.field['0'][0]?.label).toBe('Sk-15'); // untouched — nothing resolved
-    expect(G().secret.hands['0']).toEqual(['Sk-01']); // cost never paid
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull(); // Shadow Ghost left the field
+    expect(G().public.field['0'][1]?.label).toBe('Sk-30'); // guardian itself untouched
+    expect(G().secret.decks['0']).toEqual(['Sk-15']); // redirected to deck, not banished
+    expect(G().public.banished['0']).not.toContain('Sk-15');
+    expect(G().secret.hands['0']).toEqual([]); // the one hand card paid the cost
+    expect(G().public.banishedFaceDown['0']).toBe(1);
+    expect(client.getState()?.ctx.currentPlayer).toBe('1'); // still player 1's turn afterward too
+  });
+
+  test('94. Sk-15b fires and resolves for the DEFENDER when the OPPONENT wins the battle — the shape the card is actually for', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', null, null] }, // Shadow Ghost, BP7, seeded directly (no onSummon, no protectedFromBattleCardRemoval)
+        // deck: ['Sk-02'] is a harmless filler — turnsTaken: 1 combined with
+        // currentPlayer: '1' makes turn.onBegin's bothReady check true (the
+        // setup's own endTurn dispatch bumps player 0's turnsTaken to 1
+        // too), which would otherwise auto-lose player 1 on an empty deck
+        // before this test's own moves ever run.
+        '1': { field: ['Sk-16'], turnsTaken: 1, deck: ['Sk-02'] }, // War Dragon, BP9 — beats Shadow Ghost as attacker
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.attackBattleCard(0, 0); // player 1 attacks and wins; player 0's Sk-15 would be removed by battle
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.pid).toBe('0');
+    expect(pending?.sourceLabel).toBe('Sk-15');
+    expect(pending?.abilitySlot).toBe('removal-confirm');
+    expect(client.getState()?.ctx.currentPlayer).toBe('1'); // the attacker's turn, unchanged
+
+    client.moves.resolveChoice(true); // player 0 (the defender) returns it to hand instead
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().secret.hands['0']).toEqual(['Sk-15']);
+    expect(G().public.banished['0']).not.toContain('Sk-15');
+  });
+
+  test('95. Sk-19a fires and resolves for the DEFENDER on the same opponent-caused path', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-19', null, null] }, // Headless Horseman, BP5
+        '1': { field: ['Sk-16'], turnsTaken: 1, deck: ['Sk-02'] }, // see test 94's comment on the deck filler
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.attackBattleCard(0, 0);
+
+    const pending = G().public.pendingChoice;
+    expect(pending?.pid).toBe('0');
+    expect(pending?.sourceLabel).toBe('Sk-19');
+    expect(pending?.abilitySlot).toBe('removal-confirm');
+
+    client.moves.resolveChoice(true); // player 0 keeps it on the field, once-only use
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-19');
+    expect(G().public.field['0'][0]?.replacementUsed).toBe(true);
+  });
+
+  test('96. Sk-25b fires and resolves for the DEFENDER on the same opponent-caused path, paying the hand cost', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-25', null, null], hand: ['Sk-08'] }, // Battle Shock Scorpion, BP6; Sk-08 is an Action Card
+        '1': { field: ['Sk-16'], turnsTaken: 1, deck: ['Sk-02'] }, // see test 94's comment on the deck filler
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.attackBattleCard(0, 0);
+
+    const pending = G().public.pendingChoice;
+    expect(pending?.pid).toBe('0');
+    expect(pending?.sourceLabel).toBe('Sk-25');
+    expect(pending?.abilitySlot).toBe('removal-confirm');
+
+    client.moves.resolveChoice(true); // player 0 pays the cost to survive
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-25');
+    expect(G().public.banished['0']).not.toContain('Sk-25');
+    expect(G().secret.hands['0']).toEqual([]);
+    expect(G().public.banishedFaceDown['0']).toBe(1);
+  });
+
+  test('97. the attacker cannot act while the defender\'s choice is open', () => {
+    const { client, client1, G, G1 } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', null, null] },
+        '1': { field: ['Sk-16', 'Sk-14', null], turnsTaken: 1, deck: ['Sk-02'] }, // a second Battle Card to attack with, if allowed; deck filler per test 94's comment
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.attackBattleCard(0, 0); // opens Sk-15b's own confirm for player 0
+
+    expect(G().public.pendingChoice).not.toBeNull();
+
+    // The attacker (player 1, still ctx.currentPlayer) attempts to act again
+    // while the defender's choice is open — every move already gates on
+    // G.public.pendingChoice, and player 1 is no longer even the sole
+    // active player (activePlayers now names player 0 only), so this is
+    // doubly rejected.
+    client1.moves.attackBattleCard(1, 0); // Sk-14 attacking again
+    client1.moves.endTurn();
+
+    expect(G().public.pendingChoice).not.toBeNull(); // still open — neither attempt got through
+    expect(G().public.attackedThisTurn).toBe(true); // unchanged since the first attack
+    expect(G1().public.field['1'][1]?.label).toBe('Sk-14'); // second attacker never left the field
+    expect(client1.getState()?.ctx.currentPlayer).toBe('1'); // turn never passed
+
+    // The defender answers, and only then can the attacker's turn proceed.
+    client.moves.resolveChoice(true);
+    expect(G().public.pendingChoice).toBeNull();
+  });
+
+  test('98. an ordinary same-player pendingChoice still resolves exactly as before', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-05'] },
+        '1': { field: ['Sk-29'] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // player 0 plays Sk-05 on their own turn
+
+    const pending = G().public.pendingChoice;
+    expect(pending?.pid).toBe('0');
+    expect(client.getState()?.ctx.currentPlayer).toBe('0');
+
+    client.moves.resolveChoice(0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-29');
   });
 });

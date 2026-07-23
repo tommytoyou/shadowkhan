@@ -1,29 +1,36 @@
 import { CARD_BY_LABEL } from './cards';
 import type { ActiveEffect, EffectKind, FieldCard, PendingChoice, PendingChoiceKind, ShadowkhanG } from './state';
 import { syncCounts } from './state';
-import type { FnContext } from 'boardgame.io';
+import type { Ctx, FnContext } from 'boardgame.io';
+import { Stage } from 'boardgame.io/core';
 
 /** boardgame.io's deterministic random plugin — Shuffle/Die/etc. Derived
  *  from FnContext rather than importing the plugin's own internal type
  *  directly, since that's not part of the package's public export surface. */
 type RandomAPI = FnContext<ShadowkhanG>['random'];
 
+/** boardgame.io's events API (setActivePlayers, etc.) — same derivation
+ *  reasoning as RandomAPI. Used to grant a pendingChoice's owner move access
+ *  even when they don't hold the turn — see syncActivePlayersToPendingChoice. */
+type EventsAPI = FnContext<ShadowkhanG>['events'];
+
 /**
  * The single opaque "engine context" threaded through every ability code
  * path in this file, replacing the old bare `ctx: unknown` parameter.
- * `ctx` itself has never been read anywhere in this file (it's carried
- * purely so a future need doesn't require re-plumbing every signature) —
- * `random` rides along the exact same plumbing for the same reason, so any
+ * `random` and `events` ride along the same plumbing ctx always did, so any
  * card effect, however deeply chained (fireTrigger -> run -> openChoice ->
- * ... -> resolve -> dispatchSearch -> apply), has access to boardgame.io's
- * deterministic random plugin without a parallel threading mechanism.
- * Card effects must use `ctx.random`, never Math.random — the latter would
- * desync replay and multiplayer clients, since only the plugin's calls are
- * captured/replayed by boardgame.io's engine.
+ * ... -> resolve -> dispatchSearch -> apply), has access to both without a
+ * parallel threading mechanism. Card effects must use `ctx.random`, never
+ * Math.random — the latter would desync replay and multiplayer clients,
+ * since only the plugin's calls are captured/replayed by boardgame.io's
+ * engine. `ctx.ctx` is boardgame.io's own Ctx (currentPlayer, activePlayers,
+ * etc.) — typed for real now (previously `unknown`, since nothing read it)
+ * because syncActivePlayersToPendingChoice needs ctx.currentPlayer.
  */
 export interface EngineCtx {
-  ctx: unknown;
+  ctx: Ctx;
   random: RandomAPI;
+  events: EventsAPI;
 }
 
 export type Trigger =
@@ -1114,6 +1121,50 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   ],
 };
 
+/**
+ * Keeps boardgame.io's ctx.activePlayers in sync with WHOEVER currently owns
+ * G.public.pendingChoice — the one mechanism behind "a pendingChoice is
+ * resolvable by its owner regardless of whose turn it is" (see
+ * resolveChoice in game.ts, which no longer needs its own
+ * pending.pid/ctx.currentPlayer comparison as the access gate).
+ *
+ * A pendingChoice's owner (`pid`) is not always ctx.currentPlayer: a
+ * self-hook or guardian can open a choice for the DEFENDER while the
+ * ATTACKER still holds the turn (Sk-15b/19a/25b/29a/30a — see their
+ * eligible()/guards() checks, none of which require the acting player to be
+ * the card's own owner). boardgame.io's own base access control only lets
+ * ctx.currentPlayer submit a move unless ctx.activePlayers says otherwise,
+ * so without this, the choice's owner could never answer it.
+ *
+ *  - a pendingChoice is open: grant its OWNER (and only its owner) active
+ *    status via events.setActivePlayers({ value: { [pid]: Stage.NULL } }).
+ *    Stage.NULL means "active, no stage restricting which moves they may
+ *    submit" — not narrowed to a specific move subset. When pid IS
+ *    ctx.currentPlayer (the ordinary case), this is a no-op in effect: the
+ *    same single player who could already move is the only one still able
+ *    to.
+ *  - no pendingChoice: revert to boardgame.io's own default (only
+ *    ctx.currentPlayer active) via events.setActivePlayers({ currentPlayer:
+ *    Stage.NULL }), so a temporary off-turn grant never lingers once
+ *    answered.
+ *
+ * Called from exactly two places: the end of openChoice (whenever a new
+ * pendingChoice is set, or a would-be one fizzles) and the end of every
+ * resolvePendingChoice/resolveMultiChoice exit that mutates pendingChoice
+ * (resolved to null, cancelled, or chained into a new one via a nested
+ * openChoice call — which already re-syncs for the new owner, making a
+ * second call here idempotent). One mechanism, no per-card handling: no
+ * hook or ability calls this directly.
+ */
+function syncActivePlayersToPendingChoice(G: ShadowkhanG, ctx: EngineCtx): void {
+  const pending = G.public.pendingChoice;
+  if (pending) {
+    ctx.events.setActivePlayers({ value: { [pending.pid]: Stage.NULL } });
+  } else {
+    ctx.events.setActivePlayers({ currentPlayer: Stage.NULL });
+  }
+}
+
 // Generic zero-target guard: if a step's own option list is empty, there is
 // nothing legal to choose, so the ability resolves silently instead of
 // opening an unanswerable prompt. This covers both the initial dispatch and
@@ -1138,8 +1189,14 @@ function openChoice(
   multi?: { count: number; exact: boolean }
 ): void {
   const options = choice.getOptions(G, ctx, self);
-  if (options !== null && options.length === 0) return;
-  if (multi?.exact && options !== null && options.length < multi.count) return;
+  if (options !== null && options.length === 0) {
+    syncActivePlayersToPendingChoice(G, ctx);
+    return;
+  }
+  if (multi?.exact && options !== null && options.length < multi.count) {
+    syncActivePlayersToPendingChoice(G, ctx);
+    return;
+  }
   G.public.pendingChoice = {
     pid: self.pid,
     prompt: choice.prompt,
@@ -1150,6 +1207,7 @@ function openChoice(
     abilitySlot: key,
     ...(multi ? { multi: { count: multi.count, exact: multi.exact, selected: [] } } : {}),
   };
+  syncActivePlayersToPendingChoice(G, ctx);
 }
 
 // For a trigger-bound yesNo entry, decides whether it should open at all.
@@ -2683,6 +2741,7 @@ function resolveMultiChoice(
   if (typeof answer === 'boolean') {
     if (answer === false) {
       G.public.pendingChoice = null;
+      syncActivePlayersToPendingChoice(G, ctx);
       return true;
     }
     if (multi.exact && multi.selected.length !== multi.count) return false;
@@ -2690,6 +2749,7 @@ function resolveMultiChoice(
     const finalSelected = multi.selected;
     G.public.pendingChoice = null;
     choice.resolve(G, ctx, self, finalSelected);
+    syncActivePlayersToPendingChoice(G, ctx);
     syncCounts(G);
     return true;
   }
@@ -2706,6 +2766,7 @@ function resolveMultiChoice(
     const finalSelected = multi.selected;
     G.public.pendingChoice = null;
     choice.resolve(G, ctx, self, finalSelected);
+    syncActivePlayersToPendingChoice(G, ctx);
     syncCounts(G);
   }
   return true;
@@ -2725,6 +2786,7 @@ export function resolvePendingChoice(
   const choice = CHOICE_ABILITIES_BY_LABEL[pending.sourceLabel]?.[pending.abilitySlot];
   if (!choice) {
     G.public.pendingChoice = null;
+    syncActivePlayersToPendingChoice(G, ctx);
     return false;
   }
 
@@ -2742,6 +2804,7 @@ export function resolvePendingChoice(
   const self: AbilitySelf = { pid: pending.pid, slot: pending.sourceSlot ?? -1 };
   G.public.pendingChoice = null;
   choice.resolve(G, ctx, self, answer);
+  syncActivePlayersToPendingChoice(G, ctx);
   syncCounts(G);
   return true;
 }

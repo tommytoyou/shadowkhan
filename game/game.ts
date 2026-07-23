@@ -89,7 +89,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
   },
 
   turn: {
-    onBegin: ({ G, ctx, random }) => {
+    onBegin: ({ G, ctx, random, events }) => {
       G.public.attackedThisTurn = false;
 
       const pid = ctx.currentPlayer;
@@ -102,7 +102,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
           if (G.secret.decks[pid].length === 0) {
             G.public.loser = pid;
           } else {
-            drawCardForPlayer(G, { ctx, random }, pid);
+            drawCardForPlayer(G, { ctx, random, events }, pid);
           }
         }
       }
@@ -121,18 +121,18 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
   moves: {
     drawCard: {
       client: false,
-      move: ({ G, ctx, random }) => {
+      move: ({ G, ctx, random, events }) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         if (G.secret.hands[pid].length >= MAX_HAND_SIZE) return INVALID_MOVE;
         if (G.secret.decks[pid].length === 0) return INVALID_MOVE;
-        drawCardForPlayer(G, { ctx, random }, pid);
+        drawCardForPlayer(G, { ctx, random, events }, pid);
       },
     },
 
     playCard: {
       client: false,
-      move: ({ G, ctx, random }, handIndex: number, slot: number) => {
+      move: ({ G, ctx, random, events }, handIndex: number, slot: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const hand = G.secret.hands[pid];
@@ -146,17 +146,17 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         if (!isPlayLegal(G, pid, label)) return INVALID_MOVE;
 
         hand.splice(handIndex, 1);
-        placeCardOnField(G, { ctx, random }, pid, slot, label);
+        placeCardOnField(G, { ctx, random, events }, pid, slot, label);
       },
     },
 
     attackBattleCard: {
       client: false,
-      move: ({ G, ctx, random }, mySlot: number, theirSlot: number) => {
+      move: ({ G, ctx, random, events }, mySlot: number, theirSlot: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
-        const engineCtx = { ctx, random };
+        const engineCtx = { ctx, random, events };
 
         if (G.public.attackedThisTurn) return INVALID_MOVE;
         if (G.public.turnsTaken[pid] < 1) return INVALID_MOVE;
@@ -202,7 +202,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
     attackHand: {
       client: false,
-      move: ({ G, ctx, random }, mySlot: number, theirHandIndex: number) => {
+      move: ({ G, ctx, random, events }, mySlot: number, theirHandIndex: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
@@ -223,7 +223,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         G.public.attackedThisTurn = true;
 
         const targetLabel = oppHand[theirHandIndex];
-        if (interceptHandOrDeckAttack(G, { ctx, random }, targetLabel, pid, mySlot)) {
+        if (interceptHandOrDeckAttack(G, { ctx, random, events }, targetLabel, pid, mySlot)) {
           return;
         }
 
@@ -261,7 +261,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
     attackDeck: {
       client: false,
-      move: ({ G, ctx, random }, mySlot: number) => {
+      move: ({ G, ctx, random, events }, mySlot: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
@@ -279,7 +279,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         G.public.attackedThisTurn = true;
 
         const targetLabel = G.secret.decks[opp][0];
-        if (interceptHandOrDeckAttack(G, { ctx, random }, targetLabel, pid, mySlot)) {
+        if (interceptHandOrDeckAttack(G, { ctx, random, events }, targetLabel, pid, mySlot)) {
           return;
         }
 
@@ -321,7 +321,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
     activateAbility: {
       client: false,
-      move: ({ G, ctx, random }, cardFieldIndex: number) => {
+      move: ({ G, ctx, random, events }, cardFieldIndex: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         if (cardFieldIndex < 0 || cardFieldIndex >= 3) return INVALID_MOVE;
@@ -332,17 +332,33 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         if (hasActiveEffect(G, pid, cardFieldIndex, 'cannotUseEffects')) return INVALID_MOVE;
 
         card.activated = true;
-        fireTrigger(G, { ctx, random }, 'onActivate', { pid, slot: cardFieldIndex });
+        fireTrigger(G, { ctx, random, events }, 'onActivate', { pid, slot: cardFieldIndex });
       },
     },
 
+    // The pendingChoice's OWNER may resolve it, regardless of whose turn it
+    // currently is. A self-hook or guardian can open a choice for the
+    // DEFENDER while the ATTACKER still holds ctx.currentPlayer (Sk-15b/19a/
+    // 25b/29a/30a) — comparing pending.pid to ctx.currentPlayer would reject
+    // the defender outright, since ctx.currentPlayer never changes to
+    // reflect who's actually submitting a move, only whose turn it is.
+    // syncActivePlayersToPendingChoice (called from openChoice and every
+    // resolve exit — see effects.ts) keeps ctx.activePlayers in sync with
+    // pending.pid, so boardgame.io's own access control already restricts
+    // submission to exactly that player before this move body even runs;
+    // this check is belt-and-braces confirmation of the same fact, not the
+    // sole gate. Ordinary same-player choices are unaffected: pending.pid
+    // then equals both ctx.currentPlayer and the sole key of
+    // ctx.activePlayers, so either half of the OR already passes.
     resolveChoice: {
       client: false,
-      move: ({ G, ctx, random }, answer: number | boolean) => {
+      move: ({ G, ctx, random, events }, answer: number | boolean) => {
         const pending = G.public.pendingChoice;
         if (!pending) return INVALID_MOVE;
-        if (pending.pid !== ctx.currentPlayer) return INVALID_MOVE;
-        if (!resolvePendingChoice(G, { ctx, random }, answer)) return INVALID_MOVE;
+        const ownerIsActive =
+          pending.pid === ctx.currentPlayer || ctx.activePlayers?.[pending.pid] !== undefined;
+        if (!ownerIsActive) return INVALID_MOVE;
+        if (!resolvePendingChoice(G, { ctx, random, events }, answer)) return INVALID_MOVE;
       },
     },
 
