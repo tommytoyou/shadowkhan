@@ -1968,3 +1968,195 @@ describe('Sk-08a A SINISTER ALLIANCE (field placement, deck search)', () => {
     expect(G().secret.decks['0']).toEqual(['Sk-01']);
   });
 });
+
+describe('Sk-29a RAREWOLF (guardian removal hook)', () => {
+  test('82. fires and alters the outcome: accepting substitutes Rarewolf for the BP<=4 card that was about to be removed', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20', 'Sk-29', null], turnsTaken: 1 }, // Sk-20 = Sage of Dark Omen, BP2
+        '1': { field: ['Sk-25'] }, // BP6 — beats Sk-20 (BP2) as defender
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0); // Sk-20 attacks and loses
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('yesNo');
+    expect(pending?.sourceLabel).toBe('Sk-29');
+    expect(pending?.abilitySlot).toBe('guard-confirm');
+
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-20'); // survived
+    expect(G().public.field['0'][1]).toBeNull(); // Rarewolf removed instead
+    expect(G().public.banished['0']).toContain('Sk-29');
+    expect(G().public.banished['0']).not.toContain('Sk-20');
+  });
+
+  test('83. declining leaves the original removal to proceed normally', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20', 'Sk-29', null], turnsTaken: 1 },
+        '1': { field: ['Sk-25'] },
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+    client.moves.resolveChoice(false);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull(); // Sk-20 removed as normal
+    expect(G().public.field['0'][1]?.label).toBe('Sk-29'); // Rarewolf untouched
+    expect(G().public.banished['0']).toContain('Sk-20');
+    expect(G().public.banished['0']).not.toContain('Sk-29');
+  });
+
+  test('84. no guardian present: the BP<=4 card is removed with no prompt, exactly as before this pass', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20', null, null], turnsTaken: 1 },
+        '1': { field: ['Sk-25'] },
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-20');
+  });
+});
+
+describe("Sk-30a SHADOW'S MISTRESS (guardian removal hook)", () => {
+  // Vehicle: Sk-11's own overflow-wipe effect ("if the selected card's BP
+  // becomes more than 9, remove all cards from your field") is an
+  // 'ability'-cause removal player0 can trigger entirely with their own
+  // moves — the test harness's single client is bound to playerID '0', so a
+  // vehicle needing the OPPONENT to act (e.g. Sk-05's opponent-field
+  // removal) isn't reachable here. Deliberately 'ability'-cause, not
+  // 'battle': Sk-15b's own self-hook is unconditionally eligible for a
+  // 'battle'-cause removal and would win first (see test 88), which would
+  // mask Sk-30a's own behavior rather than isolate it. Sk-15 + Sk-30 (both
+  // Battle Cards) satisfy Sk-11's own "two or more Battle Cards" play gate,
+  // so Sk-11 can be played straight into the third slot.
+  test("85. fires and alters the outcome: accepting redirects Shadow Ghost to the deck and pays the hand cost", () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', 'Sk-30', null], hand: ['Sk-11', 'Sk-01'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 2); // Sk-11 into the empty slot
+    client.moves.resolveChoice(0); // buff Sk-15 (BP7 + Sk-30's BP3 = 10, over 9)
+    client.moves.resolveChoice(true); // confirm the overflow wipe
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('yesNo');
+    expect(pending?.sourceLabel).toBe('Sk-30');
+    expect(pending?.abilitySlot).toBe('guard-confirm');
+
+    client.moves.resolveChoice(true); // accept the guardian's redirect
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull(); // Shadow Ghost left the field
+    expect(G().public.field['0'][1]?.label).toBe('Sk-30'); // guardian itself untouched
+    expect(G().secret.decks['0']).toEqual(['Sk-15']); // redirected to deck, not banished
+    expect(G().public.banished['0']).not.toContain('Sk-15');
+    expect(G().secret.hands['0']).toEqual([]); // the one remaining hand card paid the cost
+    expect(G().public.banishedFaceDown['0']).toBe(1);
+  });
+
+  test('86. declining leaves the original removal to proceed normally, and the cost is never paid', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', 'Sk-30', null], hand: ['Sk-11', 'Sk-01'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 2);
+    client.moves.resolveChoice(0);
+    client.moves.resolveChoice(true);
+    client.moves.resolveChoice(false); // decline the guardian's redirect
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-15');
+    expect(G().secret.decks['0']).toEqual([]); // never redirected
+    expect(G().secret.hands['0']).toEqual(['Sk-01']); // cost never paid
+  });
+
+  test('87. cannot pay its cost (empty hand): the guardian is not offered at all, removal proceeds silently', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', 'Sk-30', null], hand: ['Sk-11'] }, // hand is empty after Sk-11 is played
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 2);
+    client.moves.resolveChoice(0);
+    client.moves.resolveChoice(true); // no guard-confirm should open from here
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-15');
+  });
+});
+
+describe('Guardian vs self-hook ordering', () => {
+  test('88. a self-hook card and an applicable guardian both present: the self-hook is offered, the guardian is never consulted for that removal', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', 'Sk-30', null], turnsTaken: 1 },
+        '1': { field: ['Sk-16'] }, // War Dragon, BP9 — beats Shadow Ghost (BP7) as defender
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0); // Sk-15 attacks and loses (battle cause)
+
+    // Sk-15b (self-hook) is unconditionally eligible for a battle-cause
+    // removal — it must win over Sk-30 (guardian), per the ordering
+    // decision in removeFieldCard.
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.sourceLabel).toBe('Sk-15');
+    expect(pending?.abilitySlot).toBe('removal-confirm');
+
+    client.moves.resolveChoice(false); // decline the self-hook's own return-to-hand offer
+
+    // Normal banishment follows — Sk-30's guardian redirect never ran for
+    // this removal (nothing added to the deck).
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-15');
+    expect(G().secret.decks['0']).toEqual([]);
+    expect(G().public.field['0'][1]?.label).toBe('Sk-30'); // guardian itself unaffected
+  });
+
+  test('89. an existing self-hook (Sk-19a) still fires unchanged even with an inapplicable guardian on the same field', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-19', 'Sk-29', null], turnsTaken: 1 }, // Sk-19 is BP5 — too high for Rarewolf's BP<=4 guard
+        '1': { field: ['Sk-16'] }, // BP9 — beats Sk-19 (BP5)
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.sourceLabel).toBe('Sk-19');
+    expect(pending?.abilitySlot).toBe('removal-confirm');
+
+    client.moves.resolveChoice(true); // remain on the field instead
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-19');
+    expect(G().public.field['0'][0]?.replacementUsed).toBe(true);
+    expect(G().public.field['0'][1]?.label).toBe('Sk-29'); // guardian never consulted, untouched
+  });
+});

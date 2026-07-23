@@ -1184,13 +1184,11 @@ function willHaveLegalOutcome(
 // Scope: field removals only. No currently-wireable card intervenes in a
 // hand or deck removal, so REMOVAL_HOOKS isn't consulted by
 // removeFromOpponentHand / removeOpponentDeckTop / discardOwnHandCard.
-// Sk-29a and Sk-30a are NOT wired here even though their printed text is
-// "intervene in a removal" shaped — see their DEFERRED_ABILITIES entries:
-// both are "guardian" abilities that protect a DIFFERENT card elsewhere on
-// the same field (Rarewolf substitutes itself for another BP<=4 card;
-// Shadow's Mistress protects a Shadow Ghost that isn't itself), which would
-// need a full field scan for a matching guardian on every removal, not a
-// same-label self-hook — a different registry shape than the other three.
+//
+// GUARDIAN_HOOKS (below REMOVAL_HOOKS) is the sibling registry for the other
+// shape: a card elsewhere on the field intervening in a DIFFERENT card's
+// removal (Sk-29a Rarewolf, Sk-30a Shadow's Mistress). See removeFieldCard
+// for how the two registries are consulted in order.
 // ---------------------------------------------------------------------------
 
 /** Why a field removal is being attempted. The printed replacement texts
@@ -1339,6 +1337,142 @@ const REMOVAL_HOOKS: Record<string, RemovalHook> = {
 };
 
 // ---------------------------------------------------------------------------
+// Guardian removal hook. The sibling of REMOVAL_HOOKS above, for a card that
+// intervenes in a DIFFERENT card's removal rather than its own: Sk-29a
+// Rarewolf ("a Battle Card with BP 4 or less on your field were to be
+// removed, you can remove this card... instead") and Sk-30a Shadow's
+// Mistress ("a Shadow Ghost on your field were to be removed, you can add it
+// to your deck instead and remove one card face down from your hand").
+// Still keyed by label — the GUARDIAN's own label, not the removed card's —
+// but reached by scanning the OTHER slots on pid's own field for a matching
+// guardian, since which card the guardian protects isn't fixed to any one
+// label the way REMOVAL_HOOKS's "this card protects itself" shape is.
+// ---------------------------------------------------------------------------
+
+export interface GuardianHook {
+  slot: 'a' | 'b' | 'c' | 'd';
+  /** Non-mutating pre-check, mirroring RemovalHook.eligible's zero-target
+   *  gate: does the card at guardianSlot (never the slot being removed —
+   *  removeFieldCard's scan skips that slot entirely, so a guardian can
+   *  never be asked to protect itself) protect `removedCard` right now?
+   *  Any cost the guardian would need to pay (e.g. Sk-30a's hand discard)
+   *  must be checked here too, so an unpayable guardian never offers its
+   *  prompt at all. */
+  guards: (
+    G: ShadowkhanG,
+    pid: string,
+    guardianSlot: number,
+    removedCard: FieldCard,
+    cause: RemovalCause
+  ) => boolean;
+  /** Opens the confirm prompt. Its resolve() owns finishing on both
+   *  branches, exactly like RemovalHook.openPrompt: apply the guardian's
+   *  substitution/redirect, or fall through to the ORIGINAL removal via
+   *  finishFieldRemoval(G, ctx, pid, removedSlot, opts) — never a recursive
+   *  call back into removeFieldCard, for the same no-infinite-loop reason
+   *  RemovalHook's resolve()s call finishFieldRemoval directly. */
+  openPrompt: (
+    G: ShadowkhanG,
+    ctx: EngineCtx,
+    pid: string,
+    guardianSlot: number,
+    removedSlot: number,
+    opts: RemovalOpts | undefined
+  ) => void;
+}
+
+const GUARDIAN_HOOKS: Record<string, GuardianHook> = {
+  // Sk-29 RAREWOLF: "If a Battle Card with a BP of 4 or less on your field
+  // were to be removed, you can remove this card on the field instead." No
+  // "by battle" qualifier in the printed text (unlike Sk-15b/19a/25b above),
+  // so this applies to both removal causes. No cost. Accepting substitutes
+  // Rarewolf itself for the original target — a removal still genuinely
+  // happens, just redirected to a different slot, so it reuses the ORIGINAL
+  // opts (fireOnRemoved/afterRemoved) exactly as declining would. currentBp
+  // is checked (not printed bp), matching how live BP-threshold checks work
+  // elsewhere (e.g. eligibleOwnBattleCardsAtOrBelow).
+  'Sk-29': {
+    slot: 'a',
+    guards: (_G, _pid, _guardianSlot, removedCard, _cause) =>
+      CARD_BY_LABEL[removedCard.label]?.type === 'battle' && removedCard.currentBp <= 4,
+    openPrompt: (G, ctx, pid, guardianSlot, removedSlot, opts) => {
+      const key = 'guard-confirm';
+      (CHOICE_ABILITIES_BY_LABEL['Sk-29'] ??= {})[key] = {
+        needsChoice: true,
+        prompt: 'Rarewolf can be removed instead to save the targeted card — remove Rarewolf on the field instead?',
+        kind: 'yesNo',
+        getOptions: () => null,
+        resolve: (G2, ctx2, _self2, answer2) => {
+          if (answer2 === true) {
+            finishFieldRemoval(G2, ctx2, pid, guardianSlot, opts);
+            return;
+          }
+          finishFieldRemoval(G2, ctx2, pid, removedSlot, opts);
+        },
+      };
+      openChoice(G, ctx, { pid, slot: guardianSlot }, 'Sk-29', key, CHOICE_ABILITIES_BY_LABEL['Sk-29'][key]);
+    },
+  },
+
+  // Sk-30 SHADOW'S MISTRESS: "If a Shadow Ghost on your field were to be
+  // removed, you can add it to your deck instead and remove one card face
+  // down from your hand." Named-card guard (not BP-based), no "by battle"
+  // qualifier either. Unlike Sk-29a, Shadow's Mistress does NOT sacrifice
+  // itself — the GUARDED card is redirected to the deck instead of being
+  // banished, so accepting is a prevent/redirect (no removal actually
+  // completes for either card): no finishFieldRemoval call, no afterRemoved,
+  // mirroring Sk-15b's own accept branch (return to hand) directly above.
+  // The hand cost is checked in `guards` itself — a guardian that can't pay
+  // must not offer the choice at all — then paid via the same dispatchSearch
+  // + banishHandCardFaceDown shape Sk-25b's cost payment already uses, just
+  // without Sk-25b's Action-Card-only restriction (this card's text has no
+  // type restriction: "one card", not "one Action Card").
+  'Sk-30': {
+    slot: 'a',
+    guards: (G, pid, _guardianSlot, removedCard, _cause) =>
+      CARD_BY_LABEL[removedCard.label]?.name === 'SHADOW GHOST' && G.secret.hands[pid].length > 0,
+    openPrompt: (G, ctx, pid, guardianSlot, removedSlot, opts) => {
+      const key = 'guard-confirm';
+      (CHOICE_ABILITIES_BY_LABEL['Sk-30'] ??= {})[key] = {
+        needsChoice: true,
+        prompt: "Shadow's Mistress can save your Shadow Ghost — add it to your deck instead, paying one face-down card from your hand?",
+        kind: 'yesNo',
+        getOptions: () => null,
+        resolve: (G2, ctx2, _self2, answer2) => {
+          if (answer2 !== true) {
+            finishFieldRemoval(G2, ctx2, pid, removedSlot, opts);
+            return;
+          }
+          // Defensive re-check: `guards` already gates on hand.length > 0
+          // before this prompt can even open, so this should never trigger.
+          if (G2.secret.hands[pid].length === 0) {
+            finishFieldRemoval(G2, ctx2, pid, removedSlot, opts);
+            return;
+          }
+          const removedCard = G2.public.field[pid][removedSlot];
+          if (!removedCard) return;
+          G2.public.field[pid][removedSlot] = null;
+          G2.secret.decks[pid].push(removedCard.label);
+          dispatchSearch(
+            G2,
+            ctx2,
+            { pid, slot: guardianSlot },
+            'Sk-30',
+            'guard-cost',
+            'hand',
+            pid,
+            () => true,
+            'Choose which card to remove face down from your hand.',
+            (G3, _ctx3, owner, handIndex) => banishHandCardFaceDown(G3, owner, handIndex)
+          );
+        },
+      };
+      openChoice(G, ctx, { pid, slot: guardianSlot }, 'Sk-30', key, CHOICE_ABILITIES_BY_LABEL['Sk-30'][key]);
+    },
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Persistent effects. Some abilities apply an ongoing restriction — a lock —
 // to a card other than (or in addition to) themselves, lasting across
 // turns rather than resolving immediately. Active effects live in
@@ -1470,19 +1604,39 @@ function finishFieldRemoval(
  *     (cause === 'battle', which attackBattleCard always passes and never
  *     gates on this flag itself — see game.ts). If it applies, the removal
  *     is blocked outright and this returns 'prevented'.
- *  2. REMOVAL_HOOKS for the card being removed:
+ *  2. REMOVAL_HOOKS for the card being removed (a SELF-hook):
  *     - no hook, or the hook doesn't apply right now (eligible() is false):
- *       proceeds exactly as before (finishFieldRemoval), returns 'removed'.
+ *       falls through to step 3.
  *     - hook applies: opens its confirm prompt and returns 'pending' —
  *       nothing about this removal has happened yet. Callers must not run
  *       any "this removal completed" logic in this dispatch when they see
  *       'pending' — see RemovalOpts.afterRemoved, which the hook's own
  *       resolve() invokes instead, once the outcome is known.
+ *  3. GUARDIAN_HOOKS: scans pid's OTHER field slots (never the slot being
+ *     removed) for a card whose guardian hook applies to this removal.
+ *     ORDERING: a self-hook always wins over a guardian when both could
+ *     apply — this step is only reached if step 2 found no eligible
+ *     self-hook. This is deliberate, not incidental: a card's own printed
+ *     defense should get first refusal before a DIFFERENT card's
+ *     substitution kicks in, and it keeps the three existing self-hooks
+ *     (Sk-15b, Sk-19a, Sk-25b) running through the exact same path with
+ *     zero behavior change — the guardian scan is purely an additional
+ *     fallback, never consulted when a self-hook already handled it. The
+ *     only current overlap in the card set is Sk-15 (self-hook) guarded by
+ *     Sk-30 (guardian) — Sk-15b is offered, Sk-30a never runs for that
+ *     removal. If exactly one guardian slot matches, its hook applies the
+ *     same way a self-hook would; slots are scanned in field order (0, 1,
+ *     2) for a deterministic pick if more than one guardian ever qualifies
+ *     simultaneously (not reachable with the current card set).
  * No infinite loops: REMOVAL_HOOKS is keyed by the REMOVED card's own
- * label, and none of the three wired hooks' replacements themselves cause
+ * label, and none of the wired self-hooks' replacements themselves cause
  * another field removal — Sk-15b/19a keep the card in play, Sk-25b's cost
  * is a hand discard (a different zone, never routed back through this
- * function) — so there's no path back into a hook for the same card.
+ * function). GUARDIAN_HOOKS is the same: the scan explicitly excludes the
+ * slot being removed (a guardian can never protect itself), and a
+ * guardian's own resolve() calls finishFieldRemoval directly — never a
+ * recursive removeFieldCard call — so a guardian substituting itself (Sk-29a)
+ * can't re-trigger the hook/guardian pipeline for its own removal.
  */
 export function removeFieldCard(
   G: ShadowkhanG,
@@ -1503,6 +1657,18 @@ export function removeFieldCard(
   if (hook && hook.eligible(G, pid, card, cause)) {
     hook.openPrompt(G, ctx, pid, slot, opts);
     return 'pending';
+  }
+
+  const field = G.public.field[pid];
+  for (let guardianSlot = 0; guardianSlot < field.length; guardianSlot++) {
+    if (guardianSlot === slot) continue;
+    const guardianCard = field[guardianSlot];
+    if (!guardianCard) continue;
+    const guardianHook = GUARDIAN_HOOKS[guardianCard.label];
+    if (guardianHook && guardianHook.guards(G, pid, guardianSlot, card, cause)) {
+      guardianHook.openPrompt(G, ctx, pid, guardianSlot, slot, opts);
+      return 'pending';
+    }
   }
 
   finishFieldRemoval(G, ctx, pid, slot, opts);
@@ -2164,10 +2330,13 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
             const ownField = G2.public.field[self2.pid];
             for (let i = 0; i < ownField.length; i++) {
               if (!ownField[i]) continue;
-              // No wired hook applies to an 'ability'-cause removal today,
-              // so this always completes synchronously — the break guards
-              // a future hook that might not, so a mid-wipe pendingChoice
-              // can't be followed by further mutation in this dispatch.
+              // Sk-30a (Shadow's Mistress) can now apply to an
+              // 'ability'-cause removal if a Shadow Ghost is being wiped and
+              // a guardian is present — this break is exactly why the loop
+              // stops instead of continuing to mutate remaining slots once a
+              // guardian (or self-hook) opens a pendingChoice: the rest of
+              // the wipe is deferred to whatever finishes that choice, not
+              // resumed here.
               const result = removeFieldCard(G2, ctx2, self2.pid, i, 'ability');
               if (result === 'pending') break;
             }
@@ -2631,6 +2800,4 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-26', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Depends entirely on Sk-26a's 'place under this card' mechanic, which is deferred — nothing will ever be attached to return." },
   { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },
   { label: 'Sk-28', slot: 'c', classification: 'NOT_IMPLEMENTED', reason: 'Same missing infrastructure as slot b — and this branch is a turn-count timeout, not a draw event, so onDraw does not apply to it at all.' },
-  { label: 'Sk-29', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can remove this card on the field instead' — a GUARDIAN ability protecting a DIFFERENT own card elsewhere on the field (any own BP<=4 Battle Card, not itself), not a self-protection hook. REMOVAL_HOOKS is keyed by the label of the card BEING removed, so it can't express 'watch for ANY other qualifying card being removed and offer to substitute' — that needs a full field scan on every removal, a different shape than the other three wired hooks." },
-  { label: 'Sk-30', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can add it to your deck instead...' — same guardian shape as Sk-29a: protects a Shadow Ghost elsewhere on the field, not itself. Same reason for staying out of REMOVAL_HOOKS." },
 ];
