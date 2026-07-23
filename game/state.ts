@@ -24,6 +24,33 @@ export type PendingChoiceKind =
   | 'yesNo'
   | 'chooseAbility';
 
+/** What an active persistent effect restricts on its target. Distinct kinds
+ *  (rather than one blanket "locked") so a narrow effect like Gargoyle's
+ *  adjacency lock ("cannot attack") doesn't accidentally also block
+ *  "be attacked" or "use card effects" the way Curse of Stone's full lock
+ *  does. */
+export type EffectKind = 'cannotAttack' | 'cannotBeAttacked' | 'cannotUseEffects';
+
+/** A persistent, ongoing effect applied by one field card to another (or to
+ *  itself), tracked in G.public so it's visible to both players and never
+ *  ad-hoc recomputed. Expires either when `expiresAtGlobalTurn` is reached
+ *  (a stated turn-based duration) or when its source or target card leaves
+ *  the field slot recorded here (a "while this card is on the field" aura,
+ *  or just avoiding a stale reference to a slot that gets reused) — see
+ *  expireEffectsForSlot in effects.ts. */
+export interface ActiveEffect {
+  kinds: EffectKind[];
+  targetPid: string;
+  targetSlot: number;
+  sourceLabel: string;
+  sourcePid: string;
+  sourceSlot: number;
+  /** Prune once turnsTaken['0']+turnsTaken['1'] reaches this value (checked
+   *  at turn.onEnd, after incrementing). Omitted for an effect that only
+   *  expires when its source/target leaves the field. */
+  expiresAtGlobalTurn?: number;
+}
+
 export interface PendingChoice {
   /** Player who must answer. */
   pid: string;
@@ -59,6 +86,9 @@ export interface PublicState {
   rulesOfEngagementActive: boolean;
   /** Non-null while an ability is waiting on player input; blocks other moves until resolved. */
   pendingChoice: PendingChoice | null;
+  /** Ongoing effects currently in force — see ActiveEffect. Public so a lock
+   *  is visible to both players, not just its caster. */
+  activeEffects: ActiveEffect[];
 }
 
 export interface ShadowkhanG {

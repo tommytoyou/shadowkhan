@@ -1,5 +1,5 @@
 import { CARD_BY_LABEL } from './cards';
-import type { FieldCard, PendingChoiceKind, ShadowkhanG } from './state';
+import type { ActiveEffect, EffectKind, FieldCard, PendingChoiceKind, ShadowkhanG } from './state';
 import { syncCounts } from './state';
 
 export type Trigger =
@@ -422,6 +422,33 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
+  // Sk-12 CURSE OF STONE: "Select one Battle Card on your opponent's field.
+  // The selected card and any cards they control with the same BP cannot
+  // attack, be attacked, or use card effects. This effect lasts until the
+  // end of your opponent's turn after this card was activated." A power
+  // card — playing it is its activation, same precedent as Sk-10/11/13.
+  // Same CHOICE_READY pre-check shape as Sk-05/10/11 above: only opens the
+  // target choice if the opponent has a Battle Card to select. The lock
+  // applies to every one of the opponent's field cards sharing the
+  // selected card's CURRENT BP, snapshotted once at that moment (not
+  // re-evaluated as BP changes later), through the new persistent-effect
+  // registry — see hasActiveEffect/expireTimedEffects/expireEffectsForSlot.
+  'Sk-12': [
+    {
+      slot: 'a',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        const eligible = G.public.field[opp]
+          .map((c, i) => (c && CARD_BY_LABEL[c.label]?.type === 'battle' ? i : null))
+          .filter((i): i is number => i !== null);
+        if (eligible.length === 0) return;
+        openChoice(G, ctx, self, 'Sk-12', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-12']['a-target']);
+      },
+    },
+  ],
+
   // Sk-14 ONE EYED MECHANICAL MONSTER, ability b: "When this card removes a
   // card by battle, you may remove 1 card from your opponent's hand or the
   // top of their deck." Dispatches the initial yesNo only if the opponent
@@ -517,14 +544,19 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   // effect a: "if your opponent has a card adjacent to this one, that card
   //   cannot attack while this card is on the field." Adjacency is read as
   //   the neighbouring slot indices on the opponent's field (no player
-  //   choice — every qualifying card is locked, not a pick-one). CAVEAT: the
-  //   lock does not currently get released if Gargoyle itself later leaves
-  //   the field — that would need a back-reference from the locked card to
-  //   its locker, which is out of scope for this pass.
+  //   choice — every qualifying card is locked, not a pick-one). Uses the
+  //   persistent-effect registry (source-presence-only — no
+  //   expiresAtGlobalTurn, since the printed duration is "while this card
+  //   is on the field") rather than mutating the adjacent card's own
+  //   canAttack flag directly: expireEffectsForSlot (called from every
+  //   field removal) now correctly releases the lock the moment Gargoyle
+  //   itself leaves the field — previously a stale-lock bug, since a raw
+  //   flag mutation had no way to know when to reset itself.
   // effect b: "Remove the top card from your opponent's deck." (unconditional
   //   half) plus "This card cannot attack for the rest of the time it
   //   remains on the field" — a clean self-lock, fully correct since it's
-  //   tied to this same FieldCard object.
+  //   tied to this same FieldCard object (canAttack stays the right tool
+  //   here: self-referential, no staleness risk).
   'Sk-22': [
     {
       slot: 'a',
@@ -534,8 +566,15 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
         const opp = self.pid === '0' ? '1' : '0';
         const oppField = G.public.field[opp];
         for (const adjSlot of [self.slot - 1, self.slot + 1]) {
-          const adjCard = oppField[adjSlot];
-          if (adjCard) adjCard.canAttack = false;
+          if (!oppField[adjSlot]) continue;
+          G.public.activeEffects.push({
+            kinds: ['cannotAttack'],
+            targetPid: opp,
+            targetSlot: adjSlot,
+            sourceLabel: 'Sk-22',
+            sourcePid: self.pid,
+            sourceSlot: self.slot,
+          });
         }
       },
     },
@@ -904,6 +943,61 @@ const REMOVAL_HOOKS: Record<string, RemovalHook> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Persistent effects. Some abilities apply an ongoing restriction — a lock —
+// to a card other than (or in addition to) themselves, lasting across
+// turns rather than resolving immediately. Active effects live in
+// G.public.activeEffects (visible to both players — a lock the opponent
+// can't see would be unplayable) instead of being recomputed ad hoc, and
+// every decision point that needs to know "is this card locked right now"
+// consults the single hasActiveEffect query below, rather than each move
+// re-deriving lock state inline.
+//
+// Two independent expiry conditions, either of which may apply to a given
+// effect: a stated turn-based duration (expiresAtGlobalTurn, swept in
+// turn.onEnd) and "the source or target card left this field slot" (swept
+// in expireEffectsForSlot, called from finalizeFieldRemoval — the single
+// removal choke point — so a stale aura from a removed source, or a stale
+// entry for a slot a different card now occupies, can't linger). No
+// separate registry for effect CREATION: Sk-12/Sk-22 create effects from a
+// normal onSummon Ability/ChoiceAbility, the same registries every other
+// card uses.
+// ---------------------------------------------------------------------------
+
+/** The one place every decision point checks whether pid/slot is currently
+ *  restricted by an active effect of `kind`. */
+export function hasActiveEffect(
+  G: ShadowkhanG,
+  pid: string,
+  slot: number,
+  kind: EffectKind
+): boolean {
+  return G.public.activeEffects.some(
+    (e) => e.targetPid === pid && e.targetSlot === slot && e.kinds.includes(kind)
+  );
+}
+
+/** Prunes any active effect sourced from, OR targeting, pid/slot — called
+ *  whenever a card leaves that field slot. Covers both directions: a
+ *  removed SOURCE's aura must not linger (Gargoyle leaving the field), and
+ *  a removed TARGET's effect entry must not go stale and silently apply to
+ *  whatever card is later played into that same slot. */
+function expireEffectsForSlot(G: ShadowkhanG, pid: string, slot: number): void {
+  G.public.activeEffects = G.public.activeEffects.filter(
+    (e) => !((e.sourcePid === pid && e.sourceSlot === slot) || (e.targetPid === pid && e.targetSlot === slot))
+  );
+}
+
+/** Prunes any active effect whose turn-based duration has elapsed. Called
+ *  once from turn.onEnd, after turnsTaken has been incremented for the
+ *  player whose turn just ended. */
+export function expireTimedEffects(G: ShadowkhanG): void {
+  const globalTurns = G.public.turnsTaken['0'] + G.public.turnsTaken['1'];
+  G.public.activeEffects = G.public.activeEffects.filter(
+    (e) => e.expiresAtGlobalTurn === undefined || e.expiresAtGlobalTurn > globalTurns
+  );
+}
+
 /** Mechanical "make it gone": banishes the card at pid/slot. No hook check,
  *  no trigger — the low-level primitive both finishFieldRemoval and a
  *  declined replacement's own resolve() share. */
@@ -912,6 +1006,7 @@ function finalizeFieldRemoval(G: ShadowkhanG, pid: string, slot: number): void {
   if (!card) return;
   G.public.banished[pid].push(card.label);
   G.public.field[pid][slot] = null;
+  expireEffectsForSlot(G, pid, slot);
 }
 
 /** Fires onRemoved (if requested, while the card is still field-resident),
@@ -1301,6 +1396,45 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
     },
   },
 
+  // Sk-12 CURSE OF STONE target step. Only reachable via the dispatcher in
+  // ABILITIES_BY_LABEL['Sk-12'] above.
+  'Sk-12': {
+    'a-target': {
+      needsChoice: true,
+      prompt: "Curse of Stone: choose one of your opponent's Battle Cards. It, and every other of their cards sharing its BP, cannot attack, be attacked, or use card effects until the end of their next turn.",
+      kind: 'opponentField',
+      getOptions: (G, _ctx, self) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        return G.public.field[opp]
+          .map((c, i) => (c && CARD_BY_LABEL[c.label]?.type === 'battle' ? i : null))
+          .filter((i): i is number => i !== null);
+      },
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const opp = self.pid === '0' ? '1' : '0';
+        const target = G.public.field[opp][answer];
+        if (!target) return;
+        const bp = target.currentBp;
+        const globalTurns = G.public.turnsTaken['0'] + G.public.turnsTaken['1'];
+        const expiresAtGlobalTurn = globalTurns + 2; // through the rest of this turn, then all of the opponent's next turn
+        const kinds: EffectKind[] = ['cannotAttack', 'cannotBeAttacked', 'cannotUseEffects'];
+        G.public.field[opp].forEach((c, i) => {
+          if (c && c.currentBp === bp) {
+            G.public.activeEffects.push({
+              kinds,
+              targetPid: opp,
+              targetSlot: i,
+              sourceLabel: 'Sk-12',
+              sourcePid: self.pid,
+              sourceSlot: self.slot,
+              expiresAtGlobalTurn,
+            });
+          }
+        });
+      },
+    },
+  },
+
   // Sk-25 BATTLE SHOCK SCORPION confirm step. Only reachable via the
   // dispatcher in ABILITIES_BY_LABEL['Sk-25'] above.
   'Sk-25': {
@@ -1575,10 +1709,7 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "onDraw now exists and correctly identifies this branch (deck empty after the draw), but 'select 10 of your face-up removed cards' is a genuine multi-select — the single-answer pendingChoice/dispatchSearch machinery has no way to express picking 10 at once." },
   { label: 'Sk-08', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The play-gate (own field has Blazing Sky Goblin/Sand Squid/Battle Shock Scorpion) is now enforced via PLAY_GATES/isPlayLegal. Still unwired: 'From your deck, you may play one of the above-mentioned cards that is not already on your field' — the named-card search over the deck is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, and 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top." },
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: "Only usable on Shadow Ghost — this is a targeting/attach requirement (which field card the Power Card enhances), not a boolean state condition, so it doesn't fit PLAY_GATES's check(G, pid) => boolean shape. playCard has no attach-target parameter for Power Cards to express 'only usable on card X' at all. Excluded from this pass rather than approximated as 'Shadow Ghost merely present somewhere on the field', which would misrepresent the attachment relationship." },
-  { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-09's attach targeting, which isn't wired." },
-  { label: 'Sk-12', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select target opponent Battle Card to lock.' },
-  { label: 'Sk-12', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-12a's target selection." },
-  { label: 'Sk-12', slot: 'c', classification: 'NEEDS_CHOICE', reason: 'Duration clause tied to the deferred target selection above.' },
+  { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "A continuous removal-immunity effect with a stated duration — the persistent-effect registry (hasActiveEffect/expiresAtGlobalTurn) added for Sk-12/Sk-22 could express it directly. Still blocked on the same unrelated gap as Sk-09a though: depends on Sk-09's attach targeting (which specific field card this protects), which isn't wired." },
   { label: 'Sk-15', slot: 'a', classification: 'NOT_IMPLEMENTED', reason: "\"Cannot be removed by Battle Card effects\" — same shape as Sk-16b's protectedFromBattleCardRemoval flag (a simple onSummon set-and-forget, no choice involved) and could be wired the same trivial way, but doing so is outside this pass's scope (the removal-REPLACEMENT hook system); not blocked by missing machinery, just not picked up here." },
   { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },
   { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },

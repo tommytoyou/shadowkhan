@@ -10,7 +10,7 @@
 import { Client } from 'boardgame.io/client';
 import { ShadowkhanGame } from '../game';
 import { CARD_BY_LABEL } from '../cards';
-import type { FieldCard, PendingChoice, ShadowkhanG } from '../state';
+import type { ActiveEffect, FieldCard, PendingChoice, ShadowkhanG } from '../state';
 
 export type PlayerID = '0' | '1';
 
@@ -49,6 +49,8 @@ export interface BoardPositionSpec {
   attackedThisTurn?: boolean;
   pendingChoice?: PendingChoice | null;
   rulesOfEngagementActive?: boolean;
+  /** G.public.activeEffects. Defaults to []. */
+  activeEffects?: ActiveEffect[];
 }
 
 function toFieldCard(spec: FieldSlotSpec): FieldCard | null {
@@ -106,6 +108,7 @@ function buildG(spec: BoardPositionSpec): ShadowkhanG {
       loser: null,
       rulesOfEngagementActive: spec.rulesOfEngagementActive ?? false,
       pendingChoice: spec.pendingChoice ?? null,
+      activeEffects: [...(spec.activeEffects ?? [])],
     },
   };
 }

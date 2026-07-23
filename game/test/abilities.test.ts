@@ -961,3 +961,217 @@ describe('removal funneling: cross-cutting regressions', () => {
     expect(G().public.banished['1']).not.toContain('Sk-16');
   });
 });
+
+describe('Sk-12 CURSE OF STONE (persistent lock)', () => {
+  test('50. locks the target: it cannot be attacked while the lock is active', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], hand: ['Sk-12'], turnsTaken: 1 },
+        '1': { field: ['Sk-29'] },
+      },
+    });
+
+    client.moves.playCard(0, 1); // Sk-12 into slot 1
+
+    const pending = G().public.pendingChoice;
+    expect(pending?.kind).toBe('opponentField');
+    expect(pending?.options).toEqual([0]);
+
+    client.moves.resolveChoice(0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    const effects = G().public.activeEffects;
+    expect(effects).toHaveLength(1);
+    expect(effects[0]).toMatchObject({ targetPid: '1', targetSlot: 0, sourcePid: '0', sourceSlot: 1 });
+    expect(effects[0].kinds).toEqual(
+      expect.arrayContaining(['cannotAttack', 'cannotBeAttacked', 'cannotUseEffects'])
+    );
+
+    client.moves.attackBattleCard(0, 0); // Sk-14 attacks the locked Sk-29 — must be rejected
+
+    expect(G().public.attackedThisTurn).toBe(false);
+    expect(G().public.field['1'][0]?.label).toBe('Sk-29');
+    expect(G().public.banished['1']).not.toContain('Sk-29');
+  });
+
+  test('51. locks every other card sharing the selected BP too', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-12'] },
+        '1': { field: ['Sk-29', 'Sk-23'] }, // both BP 4
+      },
+    });
+
+    client.moves.playCard(0, 0);
+    client.moves.resolveChoice(0); // select Sk-29 (BP 4) at slot 0
+
+    const targets = G()
+      .public.activeEffects.map((e) => e.targetSlot)
+      .sort();
+    expect(targets).toEqual([0, 1]);
+  });
+
+  test("52. the lock expires at the end of the stated duration (opponent's next turn)", () => {
+    const { G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], turnsTaken: 0 },
+        '1': { field: ['Sk-29'], turnsTaken: 0 },
+      },
+      // Dispatches exactly one endTurn (player 0's) during setup, crossing
+      // the seeded expiry threshold below.
+      currentPlayer: '1',
+      activeEffects: [
+        {
+          kinds: ['cannotAttack', 'cannotBeAttacked', 'cannotUseEffects'],
+          targetPid: '1',
+          targetSlot: 0,
+          sourceLabel: 'Sk-12',
+          sourcePid: '0',
+          sourceSlot: 1,
+          expiresAtGlobalTurn: 1,
+        },
+      ],
+    });
+
+    expect(G().public.activeEffects).toEqual([]);
+  });
+
+  test('53. the lock ends when its source (Sk-12) is removed from the field', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': {
+          field: ['Sk-12'], // BP 0 (power card) — will lose any battle
+          turnsTaken: 1,
+        },
+        '1': { field: ['Sk-29'] }, // BP 4
+      },
+      // Seed as if Sk-12 had already locked something — targeting an empty
+      // slot (1) rather than the Sk-29 we're about to attack, so this
+      // doesn't interfere with the attack that removes Sk-12 itself; only
+      // that the effect is sourced from Sk-12's own slot matters here.
+      activeEffects: [
+        {
+          kinds: ['cannotAttack', 'cannotBeAttacked', 'cannotUseEffects'],
+          targetPid: '1',
+          targetSlot: 1,
+          sourceLabel: 'Sk-12',
+          sourcePid: '0',
+          sourceSlot: 0,
+        },
+      ],
+    });
+
+    client.moves.attackBattleCard(0, 0); // Sk-12 (BP 0) attacks and loses
+
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-12');
+    expect(G().public.activeEffects).toEqual([]);
+  });
+});
+
+describe('Sk-22a GARGOYLE THE WICKED (persistent lock, retrofit)', () => {
+  test('54. playing it locks the adjacent opponent card (cannot attack)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-22'] },
+        '1': { field: [null, 'Sk-29'], deck: ['Sk-01'] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-22 into slot 0 — adjacent slot is 1
+
+    const effects = G().public.activeEffects;
+    expect(effects).toHaveLength(1);
+    expect(effects[0]).toMatchObject({
+      targetPid: '1',
+      targetSlot: 1,
+      sourcePid: '0',
+      sourceSlot: 0,
+      sourceLabel: 'Sk-22',
+    });
+    expect(effects[0].kinds).toEqual(['cannotAttack']);
+    expect(effects[0].expiresAtGlobalTurn).toBeUndefined(); // "while this card is on the field" — no turn duration
+  });
+
+  test('55. a card locked by the adjacency effect cannot attack', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': {
+          field: ['Sk-14'],
+          turnsTaken: 1,
+        },
+        '1': { field: ['Sk-29'] },
+      },
+      // Seed as if an opponent's Gargoyle had already locked player 0's Sk-14.
+      activeEffects: [
+        {
+          kinds: ['cannotAttack'],
+          targetPid: '0',
+          targetSlot: 0,
+          sourceLabel: 'Sk-22',
+          sourcePid: '1',
+          sourceSlot: 0,
+        },
+      ],
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    expect(G().public.attackedThisTurn).toBe(false);
+    expect(G().public.field['1'][0]?.label).toBe('Sk-29');
+  });
+
+  test('56. the lock ends when Gargoyle itself is removed from the field (stale-aura fix)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-22'], turnsTaken: 1 }, // BP 6
+        '1': { field: ['Sk-16'] }, // BP 9 — Gargoyle will lose
+      },
+      activeEffects: [
+        {
+          kinds: ['cannotAttack'],
+          targetPid: '1',
+          targetSlot: 0,
+          sourceLabel: 'Sk-22',
+          sourcePid: '0',
+          sourceSlot: 0,
+        },
+      ],
+    });
+
+    client.moves.attackBattleCard(0, 0); // Sk-22 (BP 6) attacks and loses
+
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-22');
+    expect(G().public.activeEffects).toEqual([]);
+  });
+});
+
+describe('persistent effects: unaffected actions are unchanged', () => {
+  test('57. an active lock on one card does not affect an unrelated attack on a different card', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], turnsTaken: 1 },
+        '1': { field: ['Sk-29', 'Sk-27'] }, // slot 0 locked below, slot 1 is not
+      },
+      activeEffects: [
+        {
+          kinds: ['cannotBeAttacked'],
+          targetPid: '1',
+          targetSlot: 0,
+          sourceLabel: 'Sk-12',
+          sourcePid: '0',
+          sourceSlot: 1,
+        },
+      ],
+    });
+
+    client.moves.attackBattleCard(0, 1); // attack slot 1 (Sk-27), the unlocked card
+
+    expect(G().public.field['1'][1]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-27');
+    // The unrelated lock on slot 0 is untouched by this attack.
+    expect(G().public.field['1'][0]?.label).toBe('Sk-29');
+    expect(G().public.activeEffects).toHaveLength(1);
+  });
+});

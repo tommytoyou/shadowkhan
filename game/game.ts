@@ -15,6 +15,8 @@ import {
   removeOpponentDeckTop,
   removeOwnDeckTopFaceDown,
   discardOwnHandCard,
+  hasActiveEffect,
+  expireTimedEffects,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -63,6 +65,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         loser: null,
         rulesOfEngagementActive: false,
         pendingChoice: null,
+        activeEffects: [],
       },
     };
 
@@ -109,6 +112,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       for (const card of G.public.field[pid]) {
         if (card) card.turnsOnField += 1;
       }
+      expireTimedEffects(G);
     },
   },
 
@@ -165,6 +169,8 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const defender = G.public.field[opp][theirSlot];
         if (!attacker || !defender) return INVALID_MOVE;
         if (attacker.canAttack === false) return INVALID_MOVE;
+        if (hasActiveEffect(G, pid, mySlot, 'cannotAttack')) return INVALID_MOVE;
+        if (hasActiveEffect(G, opp, theirSlot, 'cannotBeAttacked')) return INVALID_MOVE;
 
         G.public.attackedThisTurn = true;
 
@@ -209,6 +215,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const attacker = G.public.field[pid][mySlot];
         if (!attacker) return INVALID_MOVE;
         if (attacker.canAttack === false) return INVALID_MOVE;
+        if (hasActiveEffect(G, pid, mySlot, 'cannotAttack')) return INVALID_MOVE;
 
         const oppHand = G.secret.hands[opp];
         if (theirHandIndex < 0 || theirHandIndex >= oppHand.length) {
@@ -240,6 +247,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const attacker = G.public.field[pid][mySlot];
         if (!attacker) return INVALID_MOVE;
         if (attacker.canAttack === false) return INVALID_MOVE;
+        if (hasActiveEffect(G, pid, mySlot, 'cannotAttack')) return INVALID_MOVE;
 
         const oppHand = G.secret.hands[opp];
         if (oppHand.length === 0) return INVALID_MOVE;
@@ -266,6 +274,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const attacker = G.public.field[pid][mySlot];
         if (!attacker) return INVALID_MOVE;
         if (attacker.canAttack === false) return INVALID_MOVE;
+        if (hasActiveEffect(G, pid, mySlot, 'cannotAttack')) return INVALID_MOVE;
 
         if (G.secret.decks[opp].length === 0) return INVALID_MOVE;
 
@@ -322,6 +331,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const card = G.public.field[pid][cardFieldIndex];
         if (!card) return INVALID_MOVE;
         if (card.activated) return INVALID_MOVE;
+        if (hasActiveEffect(G, pid, cardFieldIndex, 'cannotUseEffects')) return INVALID_MOVE;
 
         card.activated = true;
         fireTrigger(G, ctx, 'onActivate', { pid, slot: cardFieldIndex });
