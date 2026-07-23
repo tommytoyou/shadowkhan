@@ -1346,3 +1346,221 @@ describe('Sk-15a SHADOW GHOST (removal immunity)', () => {
     expect(G().public.pendingChoice).toBeNull();
   });
 });
+
+describe('Sk-20a SAGE OF DARK OMEN (multi-select)', () => {
+  test('63b. a full valid multi-select resolves correctly: exact-3 hand cost, then up-to-2 deck removal', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': {
+          field: ['Sk-20'],
+          hand: ['Sk-01', 'Sk-02', 'Sk-04', 'Sk-27'], // 4 candidates for an exact-3 cost — a real choice
+          deck: ['Sk-14', 'Sk-15', 'Sk-17'], // Sk-14 (BP8), Sk-15 (BP7) qualify; Sk-17 (BP3) doesn't
+        },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+
+    // Effect b fires unconditionally in the same dispatch (already-live
+    // behavior) — Sk-20 is removed from the field immediately, and effect
+    // a's yesNo survives that untouched (see the wiring comment for why).
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-20');
+    const confirm = G().public.pendingChoice;
+    expect(confirm?.kind).toBe('yesNo');
+    expect(confirm?.sourceLabel).toBe('Sk-20');
+
+    client.moves.resolveChoice(true);
+
+    // Hand-cost step: 4 candidates for an exact 3 — a real multi-select.
+    const handStep = G().public.pendingChoice;
+    expect(handStep?.kind).toBe('chooseAbility');
+    expect(handStep?.options).toEqual([0, 1, 2, 3]);
+    expect(handStep?.multi).toEqual({ count: 3, exact: true, selected: [] });
+
+    client.moves.resolveChoice(0); // pick 1 of 3
+    expect(G().public.pendingChoice?.multi?.selected).toEqual([0]);
+    expect(G().secret.hands['0']).toHaveLength(4); // nothing removed yet — still accumulating
+
+    client.moves.resolveChoice(1); // pick 2 of 3
+    expect(G().public.pendingChoice?.multi?.selected).toEqual([0, 1]);
+
+    client.moves.resolveChoice(2); // pick 3 of 3 — auto-finalizes
+
+    // Hand cost applied: Sk-01, Sk-02, Sk-04 discarded, Sk-27 remains.
+    expect(G().secret.hands['0']).toEqual(['Sk-27']);
+    expect(G().public.banished['0']).toEqual(expect.arrayContaining(['Sk-01', 'Sk-02', 'Sk-04']));
+
+    // Chains straight into the deck-removal step: up to 2, BP 7/8 filtered.
+    const deckStep = G().public.pendingChoice;
+    expect(deckStep?.kind).toBe('chooseAbility');
+    expect(deckStep?.options).toEqual([0, 1]); // ordinals — Sk-14, Sk-15
+    expect(deckStep?.multi).toEqual({ count: 2, exact: false, selected: [] });
+
+    client.moves.resolveChoice(0);
+    client.moves.resolveChoice(1); // reaching the cap auto-finalizes too
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.decks['0']).toEqual(['Sk-17']);
+    expect(G().public.banished['0']).toEqual(
+      expect.arrayContaining(['Sk-20', 'Sk-01', 'Sk-02', 'Sk-04', 'Sk-14', 'Sk-15'])
+    );
+  });
+
+  test('63c. a partial selection cannot resolve: finalizing early on an incomplete EXACT choice is rejected', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20'], hand: ['Sk-01', 'Sk-02', 'Sk-04', 'Sk-27'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+    client.moves.resolveChoice(true);
+    client.moves.resolveChoice(0); // pick only 1 of the required 3
+
+    client.moves.resolveChoice(true); // try to finalize early — must be rejected
+
+    // Rejected cleanly: the choice is still open, still holding just the one
+    // pick, and nothing has been removed from hand.
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.multi?.selected).toEqual([0]);
+    expect(G().secret.hands['0']).toEqual(['Sk-01', 'Sk-02', 'Sk-04', 'Sk-27']);
+    expect(G().public.banished['0']).not.toEqual(expect.arrayContaining(['Sk-01']));
+  });
+
+  test('63d. cancelling an optional multi-select leaves state untouched', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20'], hand: ['Sk-01', 'Sk-02', 'Sk-04', 'Sk-27'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+    client.moves.resolveChoice(true);
+    client.moves.resolveChoice(0); // tentatively pick 1 of 3
+
+    client.moves.resolveChoice(false); // cancel
+
+    expect(G().public.pendingChoice).toBeNull();
+    // Nothing tentatively picked ever takes effect — hand is fully intact.
+    expect(G().secret.hands['0']).toEqual(['Sk-01', 'Sk-02', 'Sk-04', 'Sk-27']);
+    // Only Sk-20 itself (effect b, unrelated and already unconditional) is banished.
+    expect(G().public.banished['0']).toEqual(['Sk-20']);
+  });
+
+  test('63e. an exact requirement with too few candidates resolves silently (no prompt at all)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20'], hand: ['Sk-01', 'Sk-02'] }, // only 2, need exactly 3
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+
+    // Effect b still fires unconditionally; effect a's yesNo never opens at
+    // all, since its cost could never be paid.
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toEqual(['Sk-20']);
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.hands['0']).toEqual(['Sk-01', 'Sk-02']);
+  });
+
+  test('63f. "up to N" with fewer than N candidates available opens normally, capped, and can finalize early', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': {
+          field: ['Sk-20'],
+          hand: ['Sk-01', 'Sk-02', 'Sk-04'], // exactly 3 — the cost auto-applies, no prompt
+          deck: ['Sk-14', 'Sk-17'], // only Sk-14 (BP8) qualifies; Sk-17 (BP3) doesn't
+        },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+    client.moves.resolveChoice(true);
+
+    // Hand cost: exactly 3 candidates for an exact-3 requirement — auto-applies.
+    expect(G().secret.hands['0']).toEqual([]);
+
+    // Deck step: "up to 2", but only 1 candidate exists — opens capped at 1,
+    // not forced, and count (2) can never be reached.
+    const deckStep = G().public.pendingChoice;
+    expect(deckStep?.options).toEqual([0]);
+    expect(deckStep?.multi).toEqual({ count: 2, exact: false, selected: [] });
+
+    client.moves.resolveChoice(0); // pick the only candidate
+    expect(G().public.pendingChoice?.multi?.selected).toEqual([0]); // count (2) unreachable — stays pending
+
+    client.moves.resolveChoice(true); // finalize early with fewer than the cap
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.decks['0']).toEqual(['Sk-17']);
+    expect(G().public.banished['0']).toContain('Sk-14');
+  });
+
+  test("63g. secrecy: opponent's secret.decks/secret.hands are absent from this client's payload during and after a multi-select", () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': {
+          field: ['Sk-20'],
+          hand: ['Sk-01', 'Sk-02', 'Sk-04', 'Sk-27'],
+          deck: ['Sk-14', 'Sk-15', 'Sk-17'],
+        },
+        '1': { field: [], hand: ['Sk-30'], deck: ['Sk-02', 'Sk-03', 'Sk-04'] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice?.kind).toBe('chooseAbility');
+    expect(G().secret.decks['1']).toBeUndefined();
+    expect(G().secret.hands['1']).toBeUndefined();
+
+    client.moves.resolveChoice(0);
+    client.moves.resolveChoice(1);
+    client.moves.resolveChoice(2); // finishes the hand-cost multi-select
+
+    expect(G().secret.decks['1']).toBeUndefined();
+    expect(G().secret.hands['1']).toBeUndefined();
+
+    // Chained into the deck step — still mid multi-select.
+    expect(G().public.pendingChoice).not.toBeNull();
+    client.moves.resolveChoice(0);
+    client.moves.resolveChoice(1);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.decks['1']).toBeUndefined();
+    expect(G().secret.hands['1']).toBeUndefined();
+    expect(G().secret.hands['0']).toEqual(['Sk-27']); // own secret state is fine to see
+  });
+
+  test('63h. an existing single-answer ability still works unchanged alongside the new multi-select machinery', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-05'] },
+        '1': { field: ['Sk-29'] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('opponentField');
+    expect(pending?.options).toEqual([0]);
+    expect(pending?.multi).toBeUndefined(); // single-answer choices carry no multi descriptor
+
+    client.moves.resolveChoice(0);
+
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-29');
+    expect(G().public.pendingChoice).toBeNull();
+  });
+});

@@ -80,6 +80,21 @@ export interface PendingChoice {
   sourceSlot: number | null;
   /** Registry key identifying which (possibly chained) choice step this is. */
   abilitySlot: string;
+  /** Present only for a multi-select choice: collects several picks across
+   *  multiple resolveChoice calls before resolving. Absent for every
+   *  single-answer choice, which behaves exactly as before this field was
+   *  added — see resolveMultiChoice in effects.ts. */
+  multi?: {
+    /** How many selections are required (exact) or capped at ("up to"). */
+    count: number;
+    /** true = must select exactly `count` before it can resolve.
+     *  false = "up to `count`" — may finalize early with fewer (including
+     *  zero) via a boolean `true` answer, or auto-resolves on reaching
+     *  `count` the same as an exact choice. */
+    exact: boolean;
+    /** Indices into `options` picked so far — not yet resolved. */
+    selected: number[];
+  };
 }
 
 export interface SecretState {

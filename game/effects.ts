@@ -1,5 +1,5 @@
 import { CARD_BY_LABEL } from './cards';
-import type { ActiveEffect, EffectKind, FieldCard, PendingChoiceKind, ShadowkhanG } from './state';
+import type { ActiveEffect, EffectKind, FieldCard, PendingChoice, PendingChoiceKind, ShadowkhanG } from './state';
 import { syncCounts } from './state';
 
 export type Trigger =
@@ -56,11 +56,16 @@ export interface ChoiceAbility {
   prompt: string;
   kind: PendingChoiceKind;
   getOptions: (G: ShadowkhanG, ctx: unknown, self: AbilitySelf) => number[] | null;
+  /** answer is number[] only for a multi-select choice's final resolution
+   *  (see PendingChoice.multi) — every existing single-answer resolve()
+   *  already rejects a non-number/non-boolean answer via its own
+   *  `typeof answer !== ...` guard, so widening this type is safe and
+   *  requires no changes to any existing resolve() body. */
   resolve: (
     G: ShadowkhanG,
     ctx: unknown,
     self: AbilitySelf,
-    answer: number | boolean
+    answer: number | boolean | number[]
   ) => void;
 }
 
@@ -117,6 +122,43 @@ export function discardOwnHandCard(
   const [label] = hand.splice(handIndex, 1);
   G.public.banished[owner].push(label);
   return label;
+}
+
+/** Discards multiple cards from owner's own hand, face-up, by LABEL rather
+ *  than index — safe regardless of processing order, since each hand entry
+ *  is unique per player. The multi-select counterpart to
+ *  discardOwnHandCard, used by dispatchMultiSearch's apply callbacks. */
+export function discardMultipleFromOwnHand(
+  G: ShadowkhanG,
+  owner: string,
+  labels: string[]
+): void {
+  for (const removedLabel of labels) {
+    const hand = G.secret.hands[owner];
+    const idx = hand.indexOf(removedLabel);
+    if (idx === -1) continue;
+    const [l] = hand.splice(idx, 1);
+    G.public.banished[owner].push(l);
+  }
+}
+
+/** Removes multiple cards from owner's own deck, face-up, by LABEL — same
+ *  order-independence reasoning as discardMultipleFromOwnHand. The
+ *  multi-select counterpart to moveDeckCardToHand's "remove" shape (there's
+ *  no existing single-card "remove own deck card to banished" helper to
+ *  pair with, since no prior ability needed one). */
+export function removeMultipleFromOwnDeck(
+  G: ShadowkhanG,
+  owner: string,
+  labels: string[]
+): void {
+  for (const removedLabel of labels) {
+    const deck = G.secret.decks[owner];
+    const idx = deck.indexOf(removedLabel);
+    if (idx === -1) continue;
+    const [l] = deck.splice(idx, 1);
+    G.public.banished[owner].push(l);
+  }
 }
 
 /** Removes the card at `handIndex` from owner's own hand FACE DOWN — the
@@ -545,17 +587,50 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
-  // Sk-20 SAGE OF DARK OMEN, ability b: "Remove this card from the field and
-  // add 1 Arrival Of Doom from your deck to your hand." Fires on the new
-  // onActivate trigger (activateAbility move) — this ability has no
-  // summon/battle/removal qualifier in the printed text, it's usable at
-  // will. Both clauses are unconditional (no "may"): the field-removal
-  // always happens; the deck retrieval is independently zero-gated by
-  // dispatchSearch (no copy in deck -> silent fizzle, card is still
-  // removed). Effect a ('you may remove 3 cards from your hand to remove up
-  // to 2 BP7/8 cards from your deck') stays deferred — a multi-select cost
-  // payment, not a name/attribute search.
+  // Sk-20 SAGE OF DARK OMEN. Both effects fire on the new onActivate
+  // trigger (activateAbility move) — neither printed clause has a
+  // summon/battle/removal qualifier, so both are usable at will, same
+  // ruling as before for effect b.
+  //
+  // effect a ("While this is the only card on your side of the field, you
+  //   may remove 3 cards from your hand to remove up to 2 BP 7 or BP 8
+  //   Battle Cards from your deck.") — an EXACT-3 multi-select hand cost
+  //   chaining into an UP-TO-2 multi-select deck removal, both via
+  //   dispatchMultiSearch. CHOICE_READY pre-check shape (same as
+  //   Sk-05/10/11/24 above): only opens the yesNo if the "only card on my
+  //   field" precondition holds AND there are at least 3 hand cards to pay
+  //   with — dispatchMultiSearch's own exact-count zero-target gate would
+  //   catch the hand-size case too, but checking up front avoids opening a
+  //   yesNo whose "yes" branch could never be paid.
+  //
+  // effect a is listed BEFORE effect b so its precondition is read at the
+  // field state AS OF ACTIVATION, before b's unconditional self-removal
+  // changes it. This is safe to run alongside b in the same onActivate
+  // dispatch: b's own search (a NAMED lookup — "Arrival Of Doom" — against
+  // a singleton 30-card deck) can only ever match 0 or 1 cards, so
+  // dispatchSearch's "many matches, open a competing choice" branch is
+  // provably unreachable for it — b can never clobber a's pendingChoice.
+  // And a's own resolve chain only touches hand/deck, never self.slot's
+  // field presence, so it's unaffected by b removing Sk-20 from the field
+  // in the same dispatch.
+  //
+  // effect b ("Remove this card from the field and add 1 Arrival Of Doom
+  //   from your deck to your hand.") — unconditional (no "may"): the
+  //   field-removal always happens; the deck retrieval is independently
+  //   zero-gated by dispatchSearch (no copy in deck -> silent fizzle, card
+  //   is still removed).
   'Sk-20': [
+    {
+      slot: 'a',
+      trigger: 'onActivate',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const onlyCardOnField = G.public.field[self.pid].filter((c) => c !== null).length === 1;
+        if (!onlyCardOnField) return;
+        if (G.secret.hands[self.pid].length < 3) return;
+        openChoice(G, ctx, self, 'Sk-20', 'a-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-20']['a-confirm']);
+      },
+    },
     {
       slot: 'b',
       trigger: 'onActivate',
@@ -787,10 +862,18 @@ function openChoice(
   self: AbilitySelf,
   label: string,
   key: string,
-  choice: ChoiceAbility
+  choice: ChoiceAbility,
+  /** Present only for a multi-select choice (see dispatchMultiSearch below).
+   *  Extends this same zero-target gate: for an EXACT count, fewer
+   *  candidates than required is treated the same as zero candidates — a
+   *  silent fizzle, since the requirement could never be satisfied. An "up
+   *  to N" choice never has this problem — it opens with whatever's
+   *  available, capped at N. */
+  multi?: { count: number; exact: boolean }
 ): void {
   const options = choice.getOptions(G, ctx, self);
   if (options !== null && options.length === 0) return;
+  if (multi?.exact && options !== null && options.length < multi.count) return;
   G.public.pendingChoice = {
     pid: self.pid,
     prompt: choice.prompt,
@@ -799,6 +882,7 @@ function openChoice(
     sourceLabel: label,
     sourceSlot: self.slot,
     abilitySlot: key,
+    ...(multi ? { multi: { count: multi.count, exact: multi.exact, selected: [] } } : {}),
   };
 }
 
@@ -1234,6 +1318,78 @@ function dispatchSearch(
   openChoice(G, ctx, self, label, key, searchChoice);
 }
 
+/**
+ * The MULTI-select counterpart to dispatchSearch — reuses the exact same
+ * search primitive, pendingChoice, zero-target gate, and ordinal-secrecy
+ * scheme; the only new thing is `count`/`exact` (see PendingChoice.multi).
+ *
+ * Zero/forced/enough gating, generalized for a required count instead of a
+ * single pick (mirroring dispatchSearch's own zero/one/many rule):
+ *  - zero candidates: silent fizzle (openChoice's existing zero-target gate).
+ *  - fewer candidates than an EXACT count requires: also a silent fizzle —
+ *    the requirement could never be satisfied.
+ *  - an EXACT count with EXACTLY that many candidates: no real choice to
+ *    make (every one of them must be picked) — applies immediately, same
+ *    as dispatchSearch's own single-match case, no prompt.
+ *  - "up to N" with fewer than N candidates: opens normally, capped at
+ *    whatever's available — "up to" never requires hitting N, and never
+ *    auto-forces a selection the player might want to decline (0 of 1
+ *    available is still a legal answer).
+ *  - otherwise (exact with more candidates than count, or "up to" with any
+ *    candidates present): opens a real multi-select choice.
+ *
+ * CRITICAL (same as dispatchSearch): for a deck zone, `options` are ORDINAL
+ * positions within the match list, never real deck indices. `resolve`
+ * receives the final picked ORDINALS (as number[], from resolveMultiChoice)
+ * and re-derives real matches with a fresh search, then translates to
+ * LABELS (not raw indices) before calling `apply` — labels are unique per
+ * player's deck/hand, so removing several by label is safe regardless of
+ * processing order, unlike raw indices which shift as earlier ones are
+ * spliced out.
+ */
+function dispatchMultiSearch(
+  G: ShadowkhanG,
+  ctx: unknown,
+  self: AbilitySelf,
+  label: string,
+  key: string,
+  zone: SearchZone,
+  owner: string,
+  predicate: (label: string) => boolean,
+  count: number,
+  exact: boolean,
+  prompt: string,
+  apply: (G: ShadowkhanG, owner: string, labels: string[]) => void
+): void {
+  const matches = searchIndices(G, zone, owner, predicate);
+  if (matches.length === 0) return;
+  if (exact && matches.length < count) return;
+  if (exact && matches.length === count) {
+    const source = zone === 'deck' ? G.secret.decks[owner] : G.secret.hands[owner];
+    apply(G, owner, matches.map((i) => source[i]));
+    return;
+  }
+
+  const multiChoice: ChoiceAbility = {
+    needsChoice: true,
+    prompt,
+    kind: 'chooseAbility',
+    getOptions: (G2) => searchIndices(G2, zone, owner, predicate).map((_, i) => i),
+    resolve: (G2, _ctx2, _self2, answer) => {
+      if (!Array.isArray(answer)) return;
+      const fresh = searchIndices(G2, zone, owner, predicate);
+      const source = zone === 'deck' ? G2.secret.decks[owner] : G2.secret.hands[owner];
+      const labels = answer
+        .map((ordinal) => fresh[ordinal])
+        .filter((i): i is number => i !== undefined)
+        .map((realIndex) => source[realIndex]);
+      apply(G2, owner, labels);
+    },
+  };
+  (CHOICE_ABILITIES_BY_LABEL[label] ??= {})[key] = multiChoice;
+  openChoice(G, ctx, self, label, key, multiChoice, { count, exact });
+}
+
 function eligibleOwnBattleCardsAtOrBelow(
   G: ShadowkhanG,
   self: AbilitySelf,
@@ -1609,6 +1765,54 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
     },
   },
 
+  // Sk-20 SAGE OF DARK OMEN confirm step. Only reachable via the dispatcher
+  // in ABILITIES_BY_LABEL['Sk-20'] above. On Yes, chains an exact-3
+  // multi-select hand cost into an up-to-2 multi-select deck removal.
+  'Sk-20': {
+    'a-confirm': {
+      needsChoice: true,
+      prompt: 'Sage of Dark Omen: remove 3 cards from your hand to remove up to 2 BP 7/8 Battle Cards from your deck?',
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, ctx, self, answer) => {
+        if (answer !== true) return;
+        dispatchMultiSearch(
+          G,
+          ctx,
+          self,
+          'Sk-20',
+          'a-cost',
+          'hand',
+          self.pid,
+          () => true, // any hand card qualifies as the cost
+          3,
+          true, // exact 3
+          'Choose 3 cards from your hand to remove.',
+          (G2, owner, labels) => {
+            discardMultipleFromOwnHand(G2, owner, labels);
+            dispatchMultiSearch(
+              G2,
+              ctx,
+              self,
+              'Sk-20',
+              'a-deck-target',
+              'deck',
+              owner,
+              (deckLabel) => {
+                const c = CARD_BY_LABEL[deckLabel];
+                return c?.type === 'battle' && (c.bp === 7 || c.bp === 8);
+              },
+              2,
+              false, // up to 2
+              'Choose up to 2 BP 7/8 Battle Cards to remove from your deck.',
+              (G3, owner2, deckLabels) => removeMultipleFromOwnDeck(G3, owner2, deckLabels)
+            );
+          }
+        );
+      },
+    },
+  },
+
   // Sk-10 CYCLO OPTIC BEAM target-selection steps. Only reachable via the
   // dispatcher in ABILITIES_BY_LABEL['Sk-10'] above (neither entry has a
   // `trigger`, so fireTrigger never opens them directly).
@@ -1758,6 +1962,64 @@ export function drawCardForPlayer(
   fireOnDraw(G, ctx, pid, handIndex);
 }
 
+/**
+ * Handles one resolveChoice call against a MULTI-select pendingChoice
+ * (pending.multi is set — see openChoice/dispatchMultiSearch). The same
+ * `number | boolean` answer type as every other choice is reused, just
+ * given a second meaning in this context:
+ *  - a number: one more pick. Must be a legal, not-already-picked option,
+ *    with room left. The choice auto-resolves the instant the required
+ *    count is reached (exact or "up to" alike — there's nothing more to
+ *    add once the cap is hit either way).
+ *  - `true`: finalize now with whatever's been picked so far. Only legal
+ *    for "up to N" — REJECTED (INVALID_MOVE) if exact and the count hasn't
+ *    been reached yet, so a client can't accidentally under-pay an exact
+ *    cost.
+ *  - `false`: cancel the whole choice. pendingChoice is cleared and
+ *    resolve() is never called — nothing tentatively picked takes effect.
+ *    Always legal; this is the clean cancel path for an optional ("may")
+ *    multi-select.
+ */
+function resolveMultiChoice(
+  G: ShadowkhanG,
+  ctx: unknown,
+  pending: PendingChoice,
+  choice: ChoiceAbility,
+  answer: number | boolean
+): boolean {
+  const multi = pending.multi!;
+
+  if (typeof answer === 'boolean') {
+    if (answer === false) {
+      G.public.pendingChoice = null;
+      return true;
+    }
+    if (multi.exact && multi.selected.length !== multi.count) return false;
+    const self: AbilitySelf = { pid: pending.pid, slot: pending.sourceSlot ?? -1 };
+    const finalSelected = multi.selected;
+    G.public.pendingChoice = null;
+    choice.resolve(G, ctx, self, finalSelected);
+    syncCounts(G);
+    return true;
+  }
+
+  if (typeof answer !== 'number') return false;
+  if (pending.options !== null && !pending.options.includes(answer)) return false;
+  if (multi.selected.includes(answer)) return false;
+  if (multi.selected.length >= multi.count) return false;
+
+  multi.selected.push(answer);
+
+  if (multi.selected.length === multi.count) {
+    const self: AbilitySelf = { pid: pending.pid, slot: pending.sourceSlot ?? -1 };
+    const finalSelected = multi.selected;
+    G.public.pendingChoice = null;
+    choice.resolve(G, ctx, self, finalSelected);
+    syncCounts(G);
+  }
+  return true;
+}
+
 /** Resolves G.public.pendingChoice with `answer`. Returns false (and leaves
  *  pendingChoice untouched) if there's nothing pending or the answer isn't a
  *  legal option, so the move layer can turn that into INVALID_MOVE. */
@@ -1773,6 +2035,10 @@ export function resolvePendingChoice(
   if (!choice) {
     G.public.pendingChoice = null;
     return false;
+  }
+
+  if (pending.multi) {
+    return resolveMultiChoice(G, ctx, pending, choice, answer);
   }
 
   if (pending.kind === 'yesNo') {
@@ -1832,8 +2098,8 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-03', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Two independent selections, not one search: an own-field removal target (no search involved), plus a named search for War Dragon across TWO zones (face-up removed pile, which is public, OR the deck, which is secret) — dispatchSearch only takes a single zone, and folding the public removed-pile half in would silently misrepresent the other half as covered. Deferred as a whole rather than wiring the deck-only half and dropping the removed-pile branch." },
   { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which removed face-up card to return, and which field slot to return it to.' },
   { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
-  { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Select hand/deck cards to remove equal to the selected card's BP; also needs a delayed 'start of next turn' summon not currently modeled." },
-  { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "onDraw now exists and correctly identifies this branch (deck empty after the draw), but 'select 10 of your face-up removed cards' is a genuine multi-select — the single-answer pendingChoice/dispatchSearch machinery has no way to express picking 10 at once." },
+  { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "dispatchMultiSearch (added this pass) can now express the multi-select removal itself, but 'cards equal to the selected card's BP' still needs a variable, dynamically-computed count derived from Sk-06a's own selection (which is itself blocked — see Sk-06a), and 'the selected card is considered played' at the start of your next turn still needs a delayed-trigger scheduler that doesn't exist. Multi-select alone doesn't unlock this." },
+  { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "dispatchMultiSearch (added this pass) can now express 'select 10' as an exact-count multi-select — but the zone is your face-up REMOVED PILE, not deck or hand, and dispatchMultiSearch (like dispatchSearch before it) only supports those two zones. Same removed-pile gap already blocking Sk-04a/Sk-18a/Sk-25c. Multi-select alone doesn't unlock this." },
   { label: 'Sk-08', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The play-gate (own field has Blazing Sky Goblin/Sand Squid/Battle Shock Scorpion) is now enforced via PLAY_GATES/isPlayLegal. Still unwired: 'From your deck, you may play one of the above-mentioned cards that is not already on your field' — the named-card search over the deck is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, and 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top." },
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: "Only usable on Shadow Ghost — this is a targeting/attach requirement (which field card the Power Card enhances), not a boolean state condition, so it doesn't fit PLAY_GATES's check(G, pid) => boolean shape. playCard has no attach-target parameter for Power Cards to express 'only usable on card X' at all. Excluded from this pass rather than approximated as 'Shadow Ghost merely present somewhere on the field', which would misrepresent the attachment relationship." },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "A continuous removal-immunity effect with a stated duration — the persistent-effect registry (hasActiveEffect/expiresAtGlobalTurn) added for Sk-12/Sk-22 could express it directly. Still blocked on the same unrelated gap as Sk-09a though: depends on Sk-09's attach targeting (which specific field card this protects), which isn't wired." },
@@ -1841,7 +2107,6 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },
   { label: 'Sk-18', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select 1 of your removed cards' to copy." },
   { label: 'Sk-18', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-18a's selection." },
-  { label: 'Sk-20', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may remove 3 cards from your hand...' — optional, multi-select." },
   { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select...call it correctly' — optional guessing minigame." },
   { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome." },
   { label: 'Sk-25', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you can add one face-up removed Action Card...' — optional, selects from the removed pool." },
