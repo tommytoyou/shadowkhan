@@ -486,16 +486,14 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   // Sk-15 SHADOW GHOST, effect a: "This card cannot be removed by Battle Card
   // effects." Same shape as Sk-16b below — an unconditional, self-targeted
   // permanent flag, reusing protectedFromBattleCardRemoval rather than a
-  // second protection mechanism. RULING (matching Sk-16b's own "Battle
-  // Cards" reading): "Battle Card effects" is treated as equivalent to
-  // Sk-16's "Battle Cards" — i.e. immune to the same attackBattleCard
-  // combat-removal branches protectedFromBattleCardRemoval already gates,
-  // not a broader "any ability sourced from a Battle-type card" reading.
-  // CONSEQUENCE: since this flag is set unconditionally and gates every
-  // 'battle'-cause removeFieldCard call before it's ever reached, Sk-15's
-  // own REMOVAL_HOOKS entry (effect b, "if removed by battle, may return to
-  // hand instead") no longer has a live path to fire through — see the
-  // report for this pass.
+  // second protection mechanism. RULING: NO CARD IS UNBANISHABLE — this
+  // flag protects only against an ABILITY-DRIVEN removal (cause: 'ability'
+  // in removeFieldCard — Sk-05/Sk-10/Sk-14 and similar "remove one Battle
+  // Card" effects), never against losing an ordinary BP battle (cause:
+  // 'battle'). The check lives inside removeFieldCard itself, not here.
+  // Sk-15b (below, via REMOVAL_HOOKS) covers the battle-loss case
+  // separately with its own "you may return it to hand instead" choice —
+  // the two operate on disjoint causes and don't contradict each other.
   'Sk-15': [
     {
       slot: 'a',
@@ -510,7 +508,10 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
 
   // Sk-16 WAR DRAGON: "This card cannot be removed by Battle Cards." (effect
   // b only — a and unlike its neighbours, has no "may"/"can".) Unconditional,
-  // self-targeted. Implemented as a permanent flag checked in attackBattleCard.
+  // self-targeted. Implemented as a permanent flag, checked inside
+  // removeFieldCard and scoped to ability-driven removal only — per ruling,
+  // no card is unbanishable in an ordinary BP battle, so this does not
+  // protect War Dragon from losing one.
   'Sk-16': [
     {
       slot: 'b',
@@ -864,7 +865,8 @@ export interface RemovalOpts {
 
 export type FieldRemovalResult =
   | 'removed' // completed synchronously this dispatch (normal banish, or no hook applied)
-  | 'pending'; // a hook opened a pendingChoice; finishing is deferred to its resolve()
+  | 'pending' // a hook opened a pendingChoice; finishing is deferred to its resolve()
+  | 'prevented'; // protectedFromBattleCardRemoval blocked an ability-driven removal outright
 
 export interface RemovalHook {
   slot: 'a' | 'b' | 'c' | 'd';
@@ -888,14 +890,12 @@ export interface RemovalHook {
 const REMOVAL_HOOKS: Record<string, RemovalHook> = {
   // Sk-15 SHADOW GHOST, effect b: "While this card is on the field, if it
   // would be removed by battle, you may return it to your hand instead."
-  // Repeatable (no "once"), battle-only. NOTE: now that effect a wires
-  // protectedFromBattleCardRemoval (see ABILITIES_BY_LABEL['Sk-15']), Sk-15
-  // never actually reaches a 'battle'-cause removeFieldCard call — every
-  // attackBattleCard removal branch checks that flag before calling
-  // removeFieldCard at all, so this hook's `eligible` is never consulted in
-  // practice. Left as correct, working code (still reachable if the flag
-  // were ever absent) rather than removed, per the instruction not to
-  // touch anything beyond the four items in scope this pass.
+  // Repeatable (no "once"), battle-only. Coexists with effect a's
+  // protectedFromBattleCardRemoval without contradiction: that flag is now
+  // scoped (in removeFieldCard) to cause === 'ability' only, so a
+  // 'battle'-cause removal always reaches this hook normally — a battle
+  // loss is either replaced (return to hand) or, if declined, banished
+  // like any other card.
   'Sk-15': {
     slot: 'b',
     eligible: (_G, _pid, _card, cause) => cause === 'battle',
@@ -1106,15 +1106,24 @@ function finishFieldRemoval(
 }
 
 /**
- * The single choke point for removing a card from a field slot. Checks
- * REMOVAL_HOOKS for the card being removed BEFORE any state change:
- *  - no hook, or the hook doesn't apply right now (eligible() is false):
- *    proceeds exactly as before (finishFieldRemoval), returns 'removed'.
- *  - hook applies: opens its confirm prompt and returns 'pending' —
- *    nothing about this removal has happened yet. Callers must not run any
- *    "this removal completed" logic in this dispatch when they see
- *    'pending' — see RemovalOpts.afterRemoved, which the hook's own
- *    resolve() invokes instead, once the outcome is known.
+ * The single choke point for removing a card from a field slot. Checks, in
+ * order, BEFORE any state change:
+ *  1. protectedFromBattleCardRemoval (Sk-15a, Sk-16b — "cannot be removed
+ *     by Battle Card[s]/effects"). RULING: no card is unbanishable in an
+ *     ordinary BP battle — this flag protects ONLY against an
+ *     ability-driven removal (cause === 'ability'; the Sk-05/Sk-10/Sk-14
+ *     style of "remove one Battle Card" effect), never a battle loss
+ *     (cause === 'battle', which attackBattleCard always passes and never
+ *     gates on this flag itself — see game.ts). If it applies, the removal
+ *     is blocked outright and this returns 'prevented'.
+ *  2. REMOVAL_HOOKS for the card being removed:
+ *     - no hook, or the hook doesn't apply right now (eligible() is false):
+ *       proceeds exactly as before (finishFieldRemoval), returns 'removed'.
+ *     - hook applies: opens its confirm prompt and returns 'pending' —
+ *       nothing about this removal has happened yet. Callers must not run
+ *       any "this removal completed" logic in this dispatch when they see
+ *       'pending' — see RemovalOpts.afterRemoved, which the hook's own
+ *       resolve() invokes instead, once the outcome is known.
  * No infinite loops: REMOVAL_HOOKS is keyed by the REMOVED card's own
  * label, and none of the three wired hooks' replacements themselves cause
  * another field removal — Sk-15b/19a keep the card in play, Sk-25b's cost
@@ -1131,6 +1140,10 @@ export function removeFieldCard(
 ): FieldRemovalResult {
   const card = G.public.field[pid][slot];
   if (!card) return 'removed';
+
+  if (cause === 'ability' && card.protectedFromBattleCardRemoval) {
+    return 'prevented';
+  }
 
   const hook = REMOVAL_HOOKS[card.label];
   if (hook && hook.eligible(G, pid, card, cause)) {

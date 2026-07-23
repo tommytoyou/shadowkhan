@@ -174,23 +174,25 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         G.public.attackedThisTurn = true;
 
+        // protectedFromBattleCardRemoval is NOT checked here: per ruling, no
+        // card is unbanishable in an ordinary BP battle. The flag only
+        // blocks ability-driven ('ability'-cause) removal — enforced inside
+        // removeFieldCard itself, not at this call site.
         if (attacker.currentBp > defender.currentBp) {
-          if (!defender.protectedFromBattleCardRemoval) {
-            removeFieldCard(G, ctx, opp, theirSlot, 'battle', {
-              fireOnRemoved: true,
-              afterRemoved: (G2, ctx2) => fireTrigger(G2, ctx2, 'onBattleWin', { pid, slot: mySlot }),
-            });
-          }
+          removeFieldCard(G, ctx, opp, theirSlot, 'battle', {
+            fireOnRemoved: true,
+            afterRemoved: (G2, ctx2) => fireTrigger(G2, ctx2, 'onBattleWin', { pid, slot: mySlot }),
+          });
         } else if (attacker.currentBp < defender.currentBp) {
           if (G.public.rulesOfEngagementActive) {
             // RULES OF ENGAGEMENT (Sk-01): attacking a higher-BP card reduces
             // the defender's BP by the attacker's BP instead of removing the
             // attacker; the defender is only removed once its BP hits zero.
             modifyBp(defender, -attacker.currentBp);
-            if (defender.currentBp <= 0 && !defender.protectedFromBattleCardRemoval) {
+            if (defender.currentBp <= 0) {
               removeFieldCard(G, ctx, opp, theirSlot, 'battle', { fireOnRemoved: true });
             }
-          } else if (!attacker.protectedFromBattleCardRemoval) {
+          } else {
             removeFieldCard(G, ctx, pid, mySlot, 'battle', { fireOnRemoved: true });
           }
         } else {

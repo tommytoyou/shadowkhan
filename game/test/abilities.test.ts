@@ -954,7 +954,15 @@ describe('removal funneling: cross-cutting regressions', () => {
     expect(G().public.banished['1']).toEqual([]);
   });
 
-  test('49. Sk-16 protectedFromBattleCardRemoval still blocks removal exactly as before', () => {
+  // UPDATED this pass, per the designer's ruling (NO CARD IS UNBANISHABLE):
+  // protectedFromBattleCardRemoval now protects ONLY against ability-driven
+  // removal, never an ordinary BP battle loss. This test previously
+  // asserted the OLD (now-corrected) behavior — that the flag blocked
+  // combat removal — via field['1'][0]?.label === 'Sk-16' (unremoved) and
+  // banished['1'] NOT containing it. Both assertions now flip: a protected
+  // card that loses a battle is banished normally, same as an unprotected
+  // one.
+  test('49. Sk-16 protectedFromBattleCardRemoval does NOT block an ordinary battle loss', () => {
     const { client, G } = createTestGame({
       players: {
         '0': { field: ['Sk-14'], turnsTaken: 1 }, // BP 8
@@ -965,8 +973,24 @@ describe('removal funneling: cross-cutting regressions', () => {
     client.moves.attackBattleCard(0, 0);
 
     expect(G().public.pendingChoice).toBeNull();
-    expect(G().public.field['1'][0]?.label).toBe('Sk-16');
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-16');
+  });
+
+  test('49b. Sk-16 protectedFromBattleCardRemoval DOES block an ability-driven removal', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-05'] },
+        '1': { field: [{ label: 'Sk-16', protectedFromBattleCardRemoval: true }] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-05
+    client.moves.resolveChoice(0); // target Sk-16
+
+    expect(G().public.field['1'][0]?.label).toBe('Sk-16'); // still there, unremoved
     expect(G().public.banished['1']).not.toContain('Sk-16');
+    expect(G().public.pendingChoice).toBeNull();
   });
 });
 
@@ -1271,11 +1295,19 @@ describe('Sk-13 MYSTICAL BLUE FLAME POWER CARD (timed BP effects)', () => {
 });
 
 describe('Sk-15a SHADOW GHOST (removal immunity)', () => {
-  test('61. a Battle Card (combat) removal is blocked', () => {
+  // UPDATED this pass, per the designer's ruling (NO CARD IS UNBANISHABLE):
+  // protectedFromBattleCardRemoval now protects ONLY against ability-driven
+  // removal. Tests 61-62 previously asserted the reverse (combat blocked,
+  // ability-driven removal succeeded) — both flip. Test 61 is rewritten to
+  // play Sk-15 through playCard (a real onSummon-fired flag, not seeded)
+  // and lose an ordinary battle, landing on Sk-15b's now-reachable
+  // return-to-hand hook — this is also the "real play-then-battle path"
+  // case Step 4 asks for, since tests 38-40 only ever seed Sk-15 directly.
+  test('61. a Battle Card (combat) removal is NOT blocked — it reaches Sk-15b\'s return-to-hand hook', () => {
     const { client, G } = createTestGame({
       players: {
         '0': { field: [], hand: ['Sk-15'], turnsTaken: 1 },
-        '1': { field: ['Sk-16'] }, // BP 9 — would normally remove Sk-15 (BP 7) as the losing attacker
+        '1': { field: ['Sk-16'] }, // BP 9 — Sk-15 (BP 7) loses as the attacker
       },
     });
 
@@ -1284,12 +1316,21 @@ describe('Sk-15a SHADOW GHOST (removal immunity)', () => {
 
     client.moves.attackBattleCard(0, 0);
 
-    expect(G().public.field['0'][0]?.label).toBe('Sk-15'); // still there, unremoved
+    // protectedFromBattleCardRemoval does not stop this — it's a battle
+    // loss, so Sk-15b's hook opens instead of a silent block.
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('yesNo');
+    expect(pending?.sourceLabel).toBe('Sk-15');
+
+    client.moves.resolveChoice(true); // return to hand instead of banishing
+
+    expect(G().public.field['0'][0]).toBeNull();
     expect(G().public.banished['0']).not.toContain('Sk-15');
-    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.hands['0']).toEqual(['Sk-15']);
   });
 
-  test('62. a non-Battle-Card (ability) removal still works on it', () => {
+  test('62. a non-Battle-Card (ability) removal IS blocked', () => {
     const { client, G } = createTestGame({
       players: {
         '0': { field: [], hand: ['Sk-05'] }, // Divine Sky Strike — an Action Card ability
@@ -1300,7 +1341,8 @@ describe('Sk-15a SHADOW GHOST (removal immunity)', () => {
     client.moves.playCard(0, 0); // Sk-05
     client.moves.resolveChoice(0); // target Sk-15
 
-    expect(G().public.field['1'][0]).toBeNull();
-    expect(G().public.banished['1']).toContain('Sk-15');
+    expect(G().public.field['1'][0]?.label).toBe('Sk-15'); // still there, unremoved
+    expect(G().public.banished['1']).not.toContain('Sk-15');
+    expect(G().public.pendingChoice).toBeNull();
   });
 });
