@@ -18,6 +18,7 @@ import {
   hasActiveEffect,
   expireTimedEffects,
   placeCardOnField,
+  resolveScheduledSummons,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -53,6 +54,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       secret: {
         decks: { '0': deck0, '1': deck1 },
         hands: { '0': hand0, '1': hand1 },
+        scheduledSummons: { '0': [], '1': [] },
       },
       public: {
         deckCounts: { '0': 0, '1': 0 },
@@ -77,13 +79,14 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
   playerView: ({ G, playerID }) => {
     if (playerID === null || playerID === undefined) {
-      return { ...G, secret: { decks: {}, hands: {} } };
+      return { ...G, secret: { decks: {}, hands: {}, scheduledSummons: {} } };
     }
     return {
       ...G,
       secret: {
         decks: { [playerID]: G.secret.decks[playerID] ?? [] },
         hands: { [playerID]: G.secret.hands[playerID] ?? [] },
+        scheduledSummons: { [playerID]: G.secret.scheduledSummons[playerID] ?? [] },
       },
     };
   },
@@ -93,6 +96,22 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       G.public.attackedThisTurn = false;
 
       const pid = ctx.currentPlayer;
+
+      // Mirrors expireTimedEffects firing from turn.onEnd: same globalTurns
+      // math, opposite end of the turn — "at the start of your next turn"
+      // is naturally an onBegin-time check, not an onEnd-time one.
+      resolveScheduledSummons(G, { ctx, random, events }, pid);
+
+      // A scheduled placement with 2+ empty slots opens a real pendingChoice
+      // (see dispatchPlacement) — the auto-draw below must not run on top of
+      // it. openChoice has no "already pending" guard of its own (nothing
+      // before this ever needed one, since a draw's own onDraw trigger was
+      // the only other thing onBegin could open a choice from, and never
+      // both in the same call), so without this check the draw's own onDraw
+      // could silently overwrite the scheduled placement's choice — losing
+      // it, since its entry has already been popped off the queue by now.
+      if (G.public.pendingChoice) return;
+
       const bothReady =
         G.public.turnsTaken['0'] >= 1 && G.public.turnsTaken['1'] >= 1;
 

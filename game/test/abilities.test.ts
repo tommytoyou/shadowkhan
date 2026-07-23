@@ -2393,3 +2393,127 @@ describe('createTestGame: two independent clients over one shared match', () => 
     expect(G().public.banished['1']).toContain('Sk-29');
   });
 });
+
+describe('Sk-06 TRANSFORMATION CHAMBER (scheduled summon)', () => {
+  test('99. full chain: select (auto), pay the cost (real multi-select), stays hidden and un-summoned through the intervening turn, then places on the correct later turn', () => {
+    const { client, client1, G, G1 } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-06', 'Sk-01'], deck: ['Sk-20', 'Sk-02', 'Sk-08', 'Sk-03'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-06 into slot 0
+
+    // Effect a: only Sk-20 (Battle, BP2) qualifies — Sk-02/Sk-08/Sk-03 are
+    // all Action Cards — so the search auto-selects with no prompt, and
+    // immediately chains into effect b's cost. selectedBp=2, but
+    // hand+deck combined now holds 4 cards (Sk-01, plus Sk-02/Sk-08/Sk-03
+    // left in the deck after Sk-20 was pulled out) — more than the exact
+    // count needed, so THIS opens a real multi-select, unlike the search.
+    const costPending = G().public.pendingChoice;
+    expect(costPending).not.toBeNull();
+    expect(costPending?.kind).toBe('chooseAbility');
+    expect(costPending?.sourceLabel).toBe('Sk-06');
+    expect(costPending?.abilitySlot).toBe('b-cost');
+    expect(costPending?.options).toEqual([0, 1, 2, 3]);
+    expect(costPending?.multi).toEqual({ count: 2, exact: true, selected: [] });
+
+    client.moves.resolveChoice(0); // one pick of two — not yet complete
+    expect(G().public.pendingChoice?.multi?.selected).toEqual([0]);
+
+    client.moves.resolveChoice(1); // second pick completes the exact-2 cost
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.hands['0']).toEqual([]); // Sk-01 (ordinal 0) paid
+    expect(G().secret.decks['0']).toEqual(['Sk-08', 'Sk-03']); // Sk-02 (ordinal 1) paid; Sk-20 already removed at selection
+    expect(G().public.field['0'].map((c) => c?.label ?? null)).toEqual(['Sk-06', null, null]); // not placed yet
+
+    // Secrecy: the scheduled entry lives in G.secret, visible to its owner...
+    expect(G().secret.scheduledSummons['0']).toEqual([
+      { label: 'Sk-20', summonAtGlobalTurn: 2, sourceLabel: 'Sk-06', sourceSlot: 0 },
+    ]);
+    // ...and hidden from the opponent's own client entirely.
+    expect(G1().secret.scheduledSummons['0']).toBeUndefined();
+
+    client.moves.endTurn(); // player 0's turn 1 ends (globalTurns -> 1)
+
+    // Still the intervening turn: not summonable, not usable, not visible.
+    expect(G().public.field['0'].map((c) => c?.label ?? null)).toEqual(['Sk-06', null, null]);
+    expect(G1().secret.scheduledSummons['0']).toBeUndefined();
+
+    client1.moves.endTurn(); // player 1's turn 1 ends (globalTurns -> 2) — player 0's next turn begins
+
+    // Two empty slots remain (1 and 2), so placement opens a real choice —
+    // the same emptyOwnFieldSlot machinery Sk-04a/Sk-08a already use.
+    const placePending = G().public.pendingChoice;
+    expect(placePending).not.toBeNull();
+    expect(placePending?.kind).toBe('emptyOwnFieldSlot');
+    expect(placePending?.sourceLabel).toBe('Sk-06');
+    expect(placePending?.abilitySlot).toBe('scheduled-summon');
+    expect(placePending?.options).toEqual([1, 2]);
+    expect(G().secret.scheduledSummons['0']).toEqual([]); // popped off the queue already, not stranded
+
+    client.moves.resolveChoice(1);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'].map((c) => c?.label ?? null)).toEqual(['Sk-06', 'Sk-20', null]);
+  });
+
+  test('100. the field is full when the scheduled turn arrives: the entry fizzles silently, no crash, no stranded entry', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': {
+          field: ['Sk-01', 'Sk-02', 'Sk-08'], // full — 3/3 occupied
+          deck: ['Sk-03'], // lets a normal draw succeed afterward with no complication
+          scheduledSummons: [{ label: 'Sk-20', summonAtGlobalTurn: 2, sourceLabel: 'Sk-06', sourceSlot: 0 }],
+        },
+        '1': { hand: ['Sk-01', 'Sk-02', 'Sk-03', 'Sk-04', 'Sk-05'], turnsTaken: 1 }, // full hand skips player 1's own draw-check
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.endTurn(); // player 0's turn begins with globalTurns already at the scheduled threshold
+
+    expect(G().public.pendingChoice).toBeNull(); // no crash, no stray prompt
+    expect(G().secret.scheduledSummons['0']).toEqual([]); // the entry is gone, not left stranded
+    expect(G().public.field['0'].map((c) => c?.label)).toEqual(['Sk-01', 'Sk-02', 'Sk-08']); // untouched — Sk-20 never appeared
+  });
+
+  test('101. the source card is removed before the scheduled turn: the entry is pruned, the card is lost', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': {
+          field: ['Sk-06', null, null],
+          scheduledSummons: [{ label: 'Sk-20', summonAtGlobalTurn: 100, sourceLabel: 'Sk-06', sourceSlot: 0 }],
+        },
+        '1': { field: ['Sk-16'], turnsTaken: 1, hand: ['Sk-01', 'Sk-02', 'Sk-03', 'Sk-04', 'Sk-05'] },
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.attackBattleCard(0, 0); // Sk-16 (BP9) attacks Sk-06 (BP0 by default) and wins
+
+    expect(G().public.field['0'][0]).toBeNull(); // Sk-06 removed
+    expect(G().public.banished['0']).toContain('Sk-06');
+    expect(G().secret.scheduledSummons['0']).toEqual([]); // pruned along with its source slot, not left dangling
+  });
+
+  test('102. cost cannot be paid: the eligibility pre-filter excludes the candidate, so nothing is scheduled', () => {
+    const { client, G } = createTestGame({
+      players: {
+        // Only Sk-20 (BP2) is in the deck; after it leaves as the candidate,
+        // 0 cards remain in hand+deck combined to pay its BP-2 cost.
+        '0': { field: [], hand: ['Sk-06'], deck: ['Sk-20'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-06'); // played normally
+    expect(G().secret.decks['0']).toEqual(['Sk-20']); // never touched — not even offered as a candidate
+    expect(G().secret.scheduledSummons['0']).toEqual([]);
+  });
+});

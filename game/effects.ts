@@ -192,6 +192,34 @@ export function removeMultipleFromOwnDeck(
   }
 }
 
+/** Removes multiple cards from owner's own hand AND/OR deck, face-up, by
+ *  LABEL — tries hand first, falls back to deck, same order-independence
+ *  reasoning as discardMultipleFromOwnHand/removeMultipleFromOwnDeck. The
+ *  multi-select counterpart to zone: 'handOrDeck' (see SearchZone), used by
+ *  Sk-06b's "remove from your hand and/or deck" cost, where a single label
+ *  could be in either zone and the player chooses freely between them. */
+export function removeMultipleFromHandOrDeck(
+  G: ShadowkhanG,
+  owner: string,
+  labels: string[]
+): void {
+  for (const removedLabel of labels) {
+    const hand = G.secret.hands[owner];
+    const handIdx = hand.indexOf(removedLabel);
+    if (handIdx !== -1) {
+      const [l] = hand.splice(handIdx, 1);
+      G.public.banished[owner].push(l);
+      continue;
+    }
+    const deck = G.secret.decks[owner];
+    const deckIdx = deck.indexOf(removedLabel);
+    if (deckIdx !== -1) {
+      const [l] = deck.splice(deckIdx, 1);
+      G.public.banished[owner].push(l);
+    }
+  }
+}
+
 /** Removes the card at `handIndex` from owner's own hand FACE DOWN — the
  *  label is never revealed into G.public.banished, only the count ticks up
  *  (mirrors Shockwave's face-down deck removal). Used by costs like
@@ -526,6 +554,93 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
               owner,
               label,
               `Purgatory Undone: choose which empty field slot to return ${label} to.`
+            );
+          }
+        );
+      },
+    },
+  ],
+
+  // Sk-06 TRANSFORMATION CHAMBER, effects a+b: ONE chained ability across
+  // two printed clauses, not two independent effects — effect b explicitly
+  // refers back to "the selected card" from effect a for both its cost
+  // count and its delayed-summon target. "Play this card on the field" (the
+  // start of effect a) is just Sk-06 itself being played, handled
+  // generically by playCard — the ability's own content starts at "select
+  // one Battle Card with BP 8 or lower from your deck."
+  //
+  // Mandatory throughout (no "may"/"can" anywhere in either clause). Effect
+  // a's own search predicate pre-filters for cost-payability too, not just
+  // BP<=8 and Battle type: a candidate is only offered if enough combined
+  // hand+deck cards exist to pay its OWN BP as the effect-b cost (accounting
+  // for the candidate itself still sitting in the deck at evaluation time,
+  // so it can't pay for itself). This guarantees effect b's exact-count
+  // multi-select can never fizzle for an unpayable candidate — the printed
+  // text never describes what happens to a selected-but-unaffordable card,
+  // so this pre-filter avoids inventing that edge case rather than resolving
+  // it one way or another.
+  //
+  // Selection removes the card from the deck immediately — see
+  // ScheduledSummon's doc comment in state.ts for where it lives from then
+  // on — and the found label's own printed BP becomes the mandatory EXACT
+  // count for a zone: 'handOrDeck' multi-select (effect b's "hand and/or
+  // deck", freely mixed — see SearchZone). Only once that cost is actually
+  // paid does the scheduled-summon entry get created, at
+  // globalTurns + 2 — same "your next turn" arithmetic as Sk-12/Sk-13c's
+  // "until the end of the opponent's next turn", just resolved from
+  // turn.onBegin instead of turn.onEnd (see resolveScheduledSummons).
+  'Sk-06': [
+    {
+      slot: 'a',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const isEligible = (label: string): boolean => {
+          const card = CARD_BY_LABEL[label];
+          if (!card || card.type !== 'battle' || (card.bp ?? 0) > 8) return false;
+          const bp = card.bp ?? 0;
+          // -1: the candidate itself is still physically in the deck at
+          // this evaluation point (search only scans, never mutates), so it
+          // must not count toward its own cost pool.
+          const availableForCost =
+            G.secret.hands[self.pid].length + G.secret.decks[self.pid].length - 1;
+          return availableForCost >= bp;
+        };
+        dispatchSearch(
+          G,
+          ctx,
+          self,
+          'Sk-06',
+          'a-search',
+          'deck',
+          self.pid,
+          isEligible,
+          'Transformation Chamber: choose which Battle Card (BP 8 or lower) to select.',
+          (G2, ctx2, owner, realIndex) => {
+            const [selectedLabel] = G2.secret.decks[owner].splice(realIndex, 1);
+            const selectedBp = CARD_BY_LABEL[selectedLabel]?.bp ?? 0;
+            const selectedName = CARD_BY_LABEL[selectedLabel]?.name ?? selectedLabel;
+            dispatchMultiSearch(
+              G2,
+              ctx2,
+              self,
+              'Sk-06',
+              'b-cost',
+              'handOrDeck',
+              owner,
+              () => true,
+              selectedBp,
+              true, // exact
+              `Transformation Chamber: remove ${selectedBp} card(s) from your hand and/or deck to pay for ${selectedName}.`,
+              (G3, owner3, labels) => {
+                removeMultipleFromHandOrDeck(G3, owner3, labels);
+                G3.secret.scheduledSummons[owner3].push({
+                  label: selectedLabel,
+                  summonAtGlobalTurn: G3.public.turnsTaken['0'] + G3.public.turnsTaken['1'] + 2,
+                  sourceLabel: 'Sk-06',
+                  sourceSlot: self.slot,
+                });
+              }
             );
           }
         );
@@ -1620,6 +1735,21 @@ export function expireTimedEffects(G: ShadowkhanG): void {
   G.public.activeEffects = remaining;
 }
 
+/** Drops any of pid's scheduled summons sourced from `slot` — called
+ *  whenever a card leaves that field slot, the same way expireEffectsForSlot
+ *  prunes stale ActiveEffects. RULE (Sk-06's printed text never addresses
+ *  this): if the card that scheduled a summon (Transformation Chamber
+ *  itself) is removed from the field before the scheduled turn arrives, the
+ *  scheduled card is lost — no refund to deck/hand. It was already spent
+ *  (removed from the deck, cost already paid) at selection time; "the
+ *  chamber" no longer exists to complete the transformation. Silent: this is
+ *  a side effect of removal, not its own player-facing event. */
+function expireScheduledSummonsForSlot(G: ShadowkhanG, pid: string, slot: number): void {
+  G.secret.scheduledSummons[pid] = G.secret.scheduledSummons[pid].filter(
+    (entry) => entry.sourceSlot !== slot
+  );
+}
+
 /** Mechanical "make it gone": banishes the card at pid/slot. No hook check,
  *  no trigger — the low-level primitive both finishFieldRemoval and a
  *  declined replacement's own resolve() share. The sole choke point for
@@ -1633,6 +1763,7 @@ function finalizeFieldRemoval(G: ShadowkhanG, pid: string, slot: number): void {
   G.public.banishedFromField[pid].push(card.label);
   G.public.field[pid][slot] = null;
   expireEffectsForSlot(G, pid, slot);
+  expireScheduledSummonsForSlot(G, pid, slot);
 }
 
 /** Fires onRemoved (if requested, while the card is still field-resident),
@@ -1749,19 +1880,29 @@ export function removeFieldCard(
 // search for or select, in any zone, by construction.
 // ---------------------------------------------------------------------------
 
-export type SearchZone = 'deck' | 'hand' | 'removed';
+/** 'handOrDeck' is a VIRTUAL zone for an effect text like Sk-06b's "select
+ *  and remove from your hand and/or deck" — the player freely mixes which
+ *  zone each pick comes from, so search/select needs the UNION of both, not
+ *  two separate steps that would force a rigid split. readZoneSource
+ *  concatenates hand then deck into a fresh array (hand indices first, then
+ *  deck indices) purely for search/selection purposes; removeFromHandOrDeck
+ *  is the matching removal step, since a combined-zone index isn't a real
+ *  index into either underlying array on its own. */
+export type SearchZone = 'deck' | 'hand' | 'removed' | 'handOrDeck';
 
 /** The single place that maps a zone to its underlying array. Replaces the
  *  `zone === 'deck' ? ... : ...` ternary that only had room for two zones. */
 function readZoneSource(G: ShadowkhanG, zone: SearchZone, owner: string): readonly string[] {
   if (zone === 'deck') return G.secret.decks[owner];
   if (zone === 'hand') return G.secret.hands[owner];
+  if (zone === 'handOrDeck') return [...G.secret.hands[owner], ...G.secret.decks[owner]];
   return G.public.banished[owner];
 }
 
 /** True for a zone whose real index must never reach G.public as-is (deck,
- *  hand — both secret). False for 'removed', which is already fully public
- *  — see dispatchSearch/dispatchMultiSearch for what this changes. */
+ *  hand, and handOrDeck — all secret). False for 'removed', which is
+ *  already fully public — see dispatchSearch/dispatchMultiSearch for what
+ *  this changes. */
 function zoneIsSecret(zone: SearchZone): boolean {
   return zone !== 'removed';
 }
@@ -1982,6 +2123,52 @@ function dispatchPlacement(
   };
   (CHOICE_ABILITIES_BY_LABEL[label] ??= {})[key] = placementChoice;
   openChoice(G, ctx, self, label, key, placementChoice);
+}
+
+/**
+ * Resolves any of pid's scheduled summons whose turn has arrived — the
+ * turn.onBegin counterpart to expireTimedEffects (turn.onEnd), using the
+ * exact same globalTurns arithmetic (turnsTaken['0'] + turnsTaken['1']),
+ * just checked from the opposite end of a turn: "at the start of your next
+ * turn" is naturally an onBegin-time condition, not an onEnd-time one.
+ *
+ * Each due entry is popped off the queue, then placed via dispatchPlacement
+ * — the SAME placement mechanism playCard/Sk-04a/Sk-08a all share, so the
+ * scheduled card fires onSummon exactly like any other placement (see
+ * placeCardOnField's own doc comment). dispatchPlacement's own zero/one/many
+ * shape already covers "the field is full when the scheduled turn arrives":
+ * zero empty slots is its existing silent fizzle — the card is lost, no
+ * retry, no stranded entry, since the entry has already been removed from
+ * the queue by the time dispatchPlacement is even called.
+ *
+ * Processes entries one at a time and stops as soon as a placement opens a
+ * real pendingChoice (2+ empty slots) — the rest of this dispatch would
+ * otherwise collide with that open choice. Not reachable with the current
+ * card set (Sk-06 is a singleton, so at most one entry can ever be
+ * scheduled by it), but any remaining due entries are simply left queued —
+ * still "due" next time (summonAtGlobalTurn <= globalTurns only ever
+ * becomes MORE true), so a later onBegin check picks them up rather than
+ * losing them.
+ */
+export function resolveScheduledSummons(G: ShadowkhanG, ctx: EngineCtx, pid: string): void {
+  const globalTurns = G.public.turnsTaken['0'] + G.public.turnsTaken['1'];
+  const queue = G.secret.scheduledSummons[pid];
+  while (!G.public.pendingChoice) {
+    const dueIndex = queue.findIndex((entry) => entry.summonAtGlobalTurn <= globalTurns);
+    if (dueIndex === -1) return;
+    const [entry] = queue.splice(dueIndex, 1);
+    const sourceName = CARD_BY_LABEL[entry.sourceLabel]?.name ?? entry.sourceLabel;
+    dispatchPlacement(
+      G,
+      ctx,
+      { pid, slot: entry.sourceSlot },
+      entry.sourceLabel,
+      'scheduled-summon',
+      pid,
+      entry.label,
+      `${sourceName}: choose which empty field slot to place ${entry.label} into.`
+    );
+  }
 }
 
 function eligibleOwnBattleCardsAtOrBelow(
@@ -2849,8 +3036,6 @@ export interface DeferredAbility {
 
 export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
-  { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. This is NOT a field-placement gap (dispatchPlacement, added for Sk-04a/08a, could place it immediately) — the printed text specifically delays the summon to the start of NEXT turn, which needs a scheduler that still doesn't exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
-  { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "dispatchMultiSearch (added this pass) can now express the multi-select removal itself, but 'cards equal to the selected card's BP' still needs a variable, dynamically-computed count derived from Sk-06a's own selection (which is itself blocked — see Sk-06a), and 'the selected card is considered played' at the start of your next turn still needs a delayed-trigger scheduler that doesn't exist. Multi-select alone doesn't unlock this." },
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: "Only usable on Shadow Ghost — this is a targeting/attach requirement (which field card the Power Card enhances), not a boolean state condition, so it doesn't fit PLAY_GATES's check(G, pid) => boolean shape. playCard has no attach-target parameter for Power Cards to express 'only usable on card X' at all. Excluded from this pass rather than approximated as 'Shadow Ghost merely present somewhere on the field', which would misrepresent the attachment relationship." },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "A continuous removal-immunity effect with a stated duration — the persistent-effect registry (hasActiveEffect/expiresAtGlobalTurn) added for Sk-12/Sk-22 could express it directly. Still blocked on the same unrelated gap as Sk-09a though: depends on Sk-09's attach targeting (which specific field card this protects), which isn't wired." },
   { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },

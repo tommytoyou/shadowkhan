@@ -11,7 +11,7 @@ import { Client } from 'boardgame.io/client';
 import { Local } from 'boardgame.io/multiplayer';
 import { ShadowkhanGame } from '../game';
 import { CARD_BY_LABEL } from '../cards';
-import type { ActiveEffect, FieldCard, PendingChoice, ShadowkhanG } from '../state';
+import type { ActiveEffect, FieldCard, PendingChoice, ScheduledSummon, ShadowkhanG } from '../state';
 
 export type PlayerID = '0' | '1';
 
@@ -47,6 +47,11 @@ export interface PlayerPositionSpec {
    *  test can distinguish a field-origin removed card (Sk-04a's target)
    *  from a hand/deck-origin one sitting in the same pile. */
   banishedFromField?: string[];
+  /** G.secret.scheduledSummons (see ScheduledSummon in state.ts) for this
+   *  player. Defaults to []. Seedable so a test can exercise the
+   *  turn.onBegin resolution path (field full, source already gone) without
+   *  re-deriving Sk-06's own selection+cost chain each time. */
+  scheduledSummons?: ScheduledSummon[];
 }
 
 export interface BoardPositionSpec {
@@ -114,6 +119,7 @@ function buildG(spec: BoardPositionSpec): ShadowkhanG {
     secret: {
       decks: { '0': [...deck0], '1': [...deck1] },
       hands: { '0': [...hand0], '1': [...hand1] },
+      scheduledSummons: { '0': [...(p0.scheduledSummons ?? [])], '1': [...(p1.scheduledSummons ?? [])] },
     },
     public: {
       deckCounts: { '0': deck0.length, '1': deck1.length },

@@ -72,6 +72,42 @@ export interface ActiveEffect {
   onExpire?: BpExpiryCorrection;
 }
 
+/** A card selected from a player's own deck, held in limbo (removed from the
+ *  deck, not on any field, not in the removed pile) until it is "considered
+ *  played" at the start of a later turn of its own (Sk-06a/b: "select one
+ *  Battle Card... At the start of your next turn, the selected card is
+ *  considered played"). Resolved from turn.onBegin using the SAME
+ *  globalTurns math as ActiveEffect.expiresAtGlobalTurn — see
+ *  resolveScheduledSummons in effects.ts.
+ *
+ *  Kept in G.secret, keyed by owner exactly like decks/hands: nothing in the
+ *  printed text says the selected card is revealed, unlike an explicit
+ *  "face-up" removal (compare banished vs. banishedFaceDown) — a card
+ *  leaving a player's own deck for a new, unlisted destination stays hidden
+ *  by default in this ruleset unless the text says otherwise. It carries no
+ *  legality constraint on the OPPONENT's own moves either (unlike
+ *  ActiveEffect, which must be public because a lock the opponent can't see
+ *  would make their own moves unplayable) — so there is no comparable reason
+ *  to make it public here. */
+export interface ScheduledSummon {
+  label: string;
+  /** Fires once turnsTaken['0']+turnsTaken['1'] reaches this value, checked
+   *  at turn.onBegin for whichever player's turn is starting — same
+   *  arithmetic and same "<=" comparison as expireTimedEffects, just
+   *  triggered from the opposite end of the turn. */
+  summonAtGlobalTurn: number;
+  /** Label of the card whose ability scheduled this (Sk-06 itself) — used as
+   *  the CHOICE_ABILITIES_BY_LABEL registry key when the scheduled turn
+   *  arrives and placement needs a real choice among several empty slots.
+   *  Safe to key by label alone: singleton deck, so at most one instance of
+   *  a given source label can ever have a scheduled entry outstanding. */
+  sourceLabel: string;
+  /** Field slot of the card whose ability scheduled this, checked so the
+   *  entry can be pruned if that card leaves the field before its scheduled
+   *  turn arrives — see expireScheduledSummonsForSlot. */
+  sourceSlot: number;
+}
+
 export interface PendingChoice {
   /** Player who must answer. */
   pid: string;
@@ -105,6 +141,8 @@ export interface PendingChoice {
 export interface SecretState {
   decks: Record<string, string[]>;
   hands: Record<string, string[]>;
+  /** See ScheduledSummon. Keyed by owner, same shape as decks/hands. */
+  scheduledSummons: Record<string, ScheduledSummon[]>;
 }
 
 export interface PublicState {
