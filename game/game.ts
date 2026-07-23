@@ -326,6 +326,22 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       },
     },
 
+    activateAbility: {
+      client: false,
+      move: ({ G, ctx }, cardFieldIndex: number) => {
+        if (G.public.pendingChoice) return INVALID_MOVE;
+        const pid = ctx.currentPlayer;
+        if (cardFieldIndex < 0 || cardFieldIndex >= 3) return INVALID_MOVE;
+
+        const card = G.public.field[pid][cardFieldIndex];
+        if (!card) return INVALID_MOVE;
+        if (card.activated) return INVALID_MOVE;
+
+        card.activated = true;
+        fireTrigger(G, ctx, 'onActivate', { pid, slot: cardFieldIndex });
+      },
+    },
+
     resolveChoice: {
       client: false,
       move: ({ G, ctx }, answer: number | boolean) => {

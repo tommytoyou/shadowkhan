@@ -320,3 +320,160 @@ describe('Sk-24a BLAZING SKY GOBLIN', () => {
     expect(G().secret.hands['0']).toContain('Sk-08');
   });
 });
+
+describe('Sk-20b SAGE OF DARK OMEN (onActivate)', () => {
+  test('16. activating on the field removes it and pulls Arrival Of Doom to hand', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20'], deck: ['Sk-03', 'Sk-01'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-20');
+    expect(G().secret.hands['0']).toEqual(['Sk-03']);
+    expect(G().public.deckCounts['0']).toBe(1);
+  });
+
+  test('17. no Arrival Of Doom in deck: field removal still happens, search resolves silently', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20'], deck: ['Sk-01', 'Sk-02'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-20');
+    expect(G().public.handCounts['0']).toBe(0);
+    expect(G().public.deckCounts['0']).toBe(2);
+  });
+});
+
+describe('Sk-23a PORTAL MONARCH (onActivate)', () => {
+  test('18. discard a Battle card (choosing among two) and retrieve a Battle card from deck', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-23'], hand: ['Sk-29', 'Sk-27'], deck: ['Sk-22', 'Sk-01'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+
+    // Two hand cards both qualify (any type is eligible) -> a real choice,
+    // exercising dispatchSearch's "more than one match" branch for the
+    // first time.
+    const discardChoice = G().public.pendingChoice;
+    expect(discardChoice).not.toBeNull();
+    expect(discardChoice?.kind).toBe('chooseAbility');
+    expect(discardChoice?.options).toEqual([0, 1]);
+
+    client.moves.resolveChoice(0); // discard Sk-29 (Battle) at hand index 0
+
+    // Deck retrieve step: exactly one Battle card (Sk-22) in the deck, so it
+    // applies immediately with no second prompt.
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-29');
+    expect(G().secret.hands['0']).toEqual(['Sk-27', 'Sk-22']);
+    expect(G().public.deckCounts['0']).toBe(1);
+    expect(G().public.handCounts['0']).toBe(2);
+  });
+
+  test('19. no matching type in deck: discard is handled sanely, retrieve resolves silently', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-23'], hand: ['Sk-29'], deck: ['Sk-01', 'Sk-02'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+
+    // Single hand card: discard auto-resolves with no prompt either.
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-29');
+    expect(G().public.handCounts['0']).toBe(0);
+    expect(G().public.deckCounts['0']).toBe(2);
+  });
+
+  test("20. deck search never leaks the opponent's secret hand/deck, during or after activation", () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-23'], hand: ['Sk-29', 'Sk-27'], deck: ['Sk-22', 'Sk-01'] },
+        '1': { field: [], hand: ['Sk-30'], deck: ['Sk-02', 'Sk-03', 'Sk-04'] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+
+    expect(G().public.pendingChoice?.kind).toBe('chooseAbility');
+    expect(G().secret.decks['1']).toBeUndefined();
+    expect(G().secret.hands['1']).toBeUndefined();
+
+    client.moves.resolveChoice(0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.decks['1']).toBeUndefined();
+    expect(G().secret.hands['1']).toBeUndefined();
+    expect(G().secret.hands['0']).toContain('Sk-22');
+  });
+});
+
+describe('activateAbility guards', () => {
+  test("21. rejected when it isn't the acting player's turn", () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [] },
+        '1': { field: ['Sk-23'], hand: ['Sk-29'], deck: ['Sk-01'] },
+      },
+      currentPlayer: '1',
+    });
+
+    // This client is playerID '0'; it's player 1's turn, so the move must
+    // be rejected before it ever reaches the reducer.
+    client.moves.activateAbility(0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]?.activated).toBeFalsy();
+    expect(G().public.field['1'][0]?.label).toBe('Sk-23');
+  });
+
+  test("22. rejected when the card isn't on the acting player's field", () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0); // slot 0 is empty
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0']).toEqual([null, null, null]);
+  });
+
+  test('23. rejected on a second activation of the same card', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-23'], hand: ['Sk-29'], deck: ['Sk-01', 'Sk-02'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+    expect(G().public.field['0'][0]?.activated).toBe(true);
+    const afterFirst = JSON.parse(JSON.stringify(G()));
+
+    client.moves.activateAbility(0); // already activated — must be a no-op
+
+    expect(G()).toEqual(afterFirst);
+  });
+});

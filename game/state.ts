@@ -8,6 +8,9 @@ export interface FieldCard {
   canAttack?: boolean;
   /** true = immune to removal via battle (War Dragon). */
   protectedFromBattleCardRemoval?: boolean;
+  /** true once activateAbility has fired this card's onActivate trigger —
+   *  enforces once-per-card activation without a new global flag. */
+  activated?: boolean;
 }
 
 export type PendingChoiceKind =

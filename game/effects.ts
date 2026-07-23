@@ -101,6 +101,20 @@ export function removeOpponentDeckTop(G: ShadowkhanG, oppPid: string): void {
   G.public.banished[oppPid].push(label);
 }
 
+/** Removes the card at `handIndex` from owner's own hand into their
+ *  banished pile ("discard"), and returns its label so the caller can chain
+ *  off it (e.g. Sk-23a's same-type deck retrieval). */
+export function discardOwnHandCard(
+  G: ShadowkhanG,
+  owner: string,
+  handIndex: number
+): string {
+  const hand = G.secret.hands[owner];
+  const [label] = hand.splice(handIndex, 1);
+  G.public.banished[owner].push(label);
+  return label;
+}
+
 export function modifyBp(fieldCard: FieldCard, delta: number): void {
   fieldCard.currentBp = Math.max(0, fieldCard.currentBp + delta);
 }
@@ -334,6 +348,42 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
+  // Sk-20 SAGE OF DARK OMEN, ability b: "Remove this card from the field and
+  // add 1 Arrival Of Doom from your deck to your hand." Fires on the new
+  // onActivate trigger (activateAbility move) — this ability has no
+  // summon/battle/removal qualifier in the printed text, it's usable at
+  // will. Both clauses are unconditional (no "may"): the field-removal
+  // always happens; the deck retrieval is independently zero-gated by
+  // dispatchSearch (no copy in deck -> silent fizzle, card is still
+  // removed). Effect a ('you may remove 3 cards from your hand to remove up
+  // to 2 BP7/8 cards from your deck') stays deferred — a multi-select cost
+  // payment, not a name/attribute search.
+  'Sk-20': [
+    {
+      slot: 'b',
+      trigger: 'onActivate',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const card = G.public.field[self.pid][self.slot];
+        if (!card) return;
+        G.public.banished[self.pid].push(card.label);
+        G.public.field[self.pid][self.slot] = null;
+        dispatchSearch(
+          G,
+          ctx,
+          self,
+          'Sk-20',
+          'b-search',
+          'deck',
+          self.pid,
+          (label) => CARD_BY_LABEL[label]?.name === 'ARRIVAL OF DOOM',
+          'Choose which Arrival Of Doom to add to your hand.',
+          moveDeckCardToHand
+        );
+      },
+    },
+  ],
+
   // Sk-22 GARGOYLE THE WICKED: both effects wired.
   // effect a: "if your opponent has a card adjacent to this one, that card
   //   cannot attack while this card is on the field." Adjacency is read as
@@ -369,6 +419,55 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
         removeOpponentDeckTop(G, opp);
         const card = G.public.field[self.pid][self.slot];
         if (card) card.canAttack = false;
+      },
+    },
+  ],
+
+  // Sk-23 PORTAL MONARCH: "Discard 1 Battle Card, Action Card, or Power Card
+  // from your hand to add 1 card of the same type from your deck to your
+  // hand." Fires on onActivate (usable at will, no summon/battle qualifier
+  // in the printed text). Two chained dispatchSearch calls: the discard step
+  // searches owner's own HAND with an unfiltered predicate (every printed
+  // card type is eligible, i.e. "any hand card") — zero hand cards fizzles
+  // silently, one auto-discards, more than one opens a real choice. Once a
+  // card is discarded, its recorded type drives a second dispatchSearch over
+  // the DECK; that step's own zero/one/many handling covers "no matching
+  // type in deck" for free. CAVEAT: "You cannot play the selected card this
+  // turn" is not modeled — hand cards carry no per-turn lock state.
+  'Sk-23': [
+    {
+      slot: 'a',
+      trigger: 'onActivate',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        dispatchSearch(
+          G,
+          ctx,
+          self,
+          'Sk-23',
+          'a-discard',
+          'hand',
+          self.pid,
+          () => true,
+          'Choose a card from your hand to discard.',
+          (G2, owner, handIndex) => {
+            const label = discardOwnHandCard(G2, owner, handIndex);
+            const type = CARD_BY_LABEL[label]?.type;
+            if (!type) return;
+            dispatchSearch(
+              G2,
+              ctx,
+              self,
+              'Sk-23',
+              'a-retrieve',
+              'deck',
+              owner,
+              (deckLabel) => CARD_BY_LABEL[deckLabel]?.type === type,
+              'Choose a card of the same type to add to your hand.',
+              moveDeckCardToHand
+            );
+          }
+        );
       },
     },
   ],
@@ -1040,10 +1139,8 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-18', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-18a's selection." },
   { label: 'Sk-19', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'it may remain on the field instead' — optional replacement." },
   { label: 'Sk-20', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may remove 3 cards from your hand...' — optional, multi-select." },
-  { label: 'Sk-20', slot: 'b', classification: 'NEEDS_CHOICE', reason: "The named search (Arrival Of Doom from your deck) is expressible with dispatchSearch, but the ability has no trigger event to fire it from — it's self-activated at will, and the Trigger union's 'onActivate' has no move in game.ts that ever calls fireTrigger(..., 'onActivate', ...). Needs a new activate move (game.ts), out of scope for an effects.ts-only search primitive." },
   { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select...call it correctly' — optional guessing minigame." },
   { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome." },
-  { label: 'Sk-23', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The discard (any own hand card — no predicate) and the matching-type deck retrieval are each expressible on their own (ownHandIndex + dispatchSearch), but like Sk-20b this ability has no trigger event — it's a standalone activated ability, not tied to onSummon/onBattleWin/etc. — and needs the same not-yet-built 'activate' move. (The 'cannot play the selected card this turn' restriction is also unmodeled — hand cards carry no per-turn lock state — but that alone wouldn't have blocked wiring.)" },
   { label: 'Sk-25', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you can remove face down one Action Card...' — optional, selects a hand card." },
   { label: 'Sk-25', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you can add one face-up removed Action Card...' — optional, selects from the removed pool." },
   { label: 'Sk-26', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can select one Battle Card...place it under this card' — optional target selection; also needs a new 'cards attached under this card' mechanic." },
