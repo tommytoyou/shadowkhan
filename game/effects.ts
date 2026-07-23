@@ -224,6 +224,20 @@ const PLAY_GATES: Record<string, PlayGate> = {
       G.public.field[pid].some((c) => c && CARD_BY_LABEL[c.label]?.name === 'ONE EYED MECHANICAL MONSTER'),
   },
 
+  // Sk-11 CHOSEN CONDUIT: "You can only play this card when you have two or
+  // more Battle Cards on the field." Moved here to match the other
+  // structurally identical "can only play if/when..." clauses (Sk-03/08/10/
+  // 16), which all reject the move outright via PLAY_GATES rather than
+  // letting the card onto the field and having its own ability silently
+  // fizzle. Sk-11 itself is a Power Card, never counted here regardless of
+  // whether it's already been placed by the time this runs (isPlayLegal is
+  // checked before placement anyway).
+  'Sk-11': {
+    slot: 'a',
+    check: (G, pid) =>
+      G.public.field[pid].filter((c) => c && CARD_BY_LABEL[c.label]?.type === 'battle').length >= 2,
+  },
+
   // Sk-16 WAR DRAGON: "You can only play this card if you have at least two
   // BP 7 or BP 8 cards removed, and your opponent has at least one BP 7 or
   // BP 8 card removed." Reads the (face-up) banished piles, not the field.
@@ -401,8 +415,11 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
 
   // Sk-11 CHOSEN CONDUIT: all three printed effects wired as one flow.
   // "Select one of those Battle Cards and increase its BP by the BP of your
-  // other Battle Cards" (a) — gated on having 2+ own Battle Cards, dispatched
-  // here; "only applied if the selected card's BP is 9 or less" (b) — checked
+  // other Battle Cards" (a) — the "2+ Battle Cards" precondition is now
+  // enforced via PLAY_GATES['Sk-11'] (playCard rejects the move outright),
+  // so by the time this onSummon ability runs it's guaranteed to hold —
+  // opens the target choice unconditionally, no internal fizzle needed;
+  // "only applied if the selected card's BP is 9 or less" (b) — checked
   // in the target step's resolve before computing anything; "if the selected
   // card's BP becomes more than 9, remove all cards from your field" (c) —
   // handled via a dynamically-registered yesNo confirm step (see 'a-target'
@@ -413,10 +430,6 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
       trigger: 'onSummon',
       auto: true,
       run: ({ G, ctx, self }) => {
-        const battleSlots = G.public.field[self.pid]
-          .map((c, i) => (c && CARD_BY_LABEL[c.label]?.type === 'battle' ? i : null))
-          .filter((i): i is number => i !== null);
-        if (battleSlots.length < 2) return;
         openChoice(G, ctx, self, 'Sk-11', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-11']['a-target']);
       },
     },
@@ -466,6 +479,31 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
         const opp = self.pid === '0' ? '1' : '0';
         if (G.secret.hands[opp].length === 0 && G.secret.decks[opp].length === 0) return;
         openChoice(G, ctx, self, 'Sk-14', 'b-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-14']['b-confirm']);
+      },
+    },
+  ],
+
+  // Sk-15 SHADOW GHOST, effect a: "This card cannot be removed by Battle Card
+  // effects." Same shape as Sk-16b below — an unconditional, self-targeted
+  // permanent flag, reusing protectedFromBattleCardRemoval rather than a
+  // second protection mechanism. RULING (matching Sk-16b's own "Battle
+  // Cards" reading): "Battle Card effects" is treated as equivalent to
+  // Sk-16's "Battle Cards" — i.e. immune to the same attackBattleCard
+  // combat-removal branches protectedFromBattleCardRemoval already gates,
+  // not a broader "any ability sourced from a Battle-type card" reading.
+  // CONSEQUENCE: since this flag is set unconditionally and gates every
+  // 'battle'-cause removeFieldCard call before it's ever reached, Sk-15's
+  // own REMOVAL_HOOKS entry (effect b, "if removed by battle, may return to
+  // hand instead") no longer has a live path to fire through — see the
+  // report for this pass.
+  'Sk-15': [
+    {
+      slot: 'a',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, self }) => {
+        const card = G.public.field[self.pid][self.slot];
+        if (card) card.protectedFromBattleCardRemoval = true;
       },
     },
   ],
@@ -850,7 +888,14 @@ export interface RemovalHook {
 const REMOVAL_HOOKS: Record<string, RemovalHook> = {
   // Sk-15 SHADOW GHOST, effect b: "While this card is on the field, if it
   // would be removed by battle, you may return it to your hand instead."
-  // Repeatable (no "once"), battle-only.
+  // Repeatable (no "once"), battle-only. NOTE: now that effect a wires
+  // protectedFromBattleCardRemoval (see ABILITIES_BY_LABEL['Sk-15']), Sk-15
+  // never actually reaches a 'battle'-cause removeFieldCard call — every
+  // attackBattleCard removal branch checks that flag before calling
+  // removeFieldCard at all, so this hook's `eligible` is never consulted in
+  // practice. Left as correct, working code (still reachable if the flag
+  // were ever absent) rather than removed, per the instruction not to
+  // touch anything beyond the four items in scope this pass.
   'Sk-15': {
     slot: 'b',
     eligible: (_G, _pid, _card, cause) => cause === 'battle',
@@ -977,25 +1022,60 @@ export function hasActiveEffect(
   );
 }
 
+/** Applies a 'bpModifier' effect's BP correction to its target, if it has
+ *  one, when the effect is about to be pruned — whether by reaching its
+ *  stated duration or by its source/target leaving the field early. A
+ *  no-op for non-BP effects (no onExpire) and for a target that's already
+ *  gone (nothing left to correct — the field-removal path that triggered
+ *  this already nulled the slot before pruning). */
+function applyExpiryCorrection(G: ShadowkhanG, effect: ActiveEffect): void {
+  if (!effect.onExpire) return;
+  const card = G.public.field[effect.targetPid][effect.targetSlot];
+  if (!card) return;
+  if (effect.onExpire.kind === 'revertDelta') {
+    modifyBp(card, -effect.onExpire.bpDelta);
+  } else {
+    const original = CARD_BY_LABEL[card.label]?.bp ?? card.currentBp;
+    modifyBp(card, original - card.currentBp);
+  }
+}
+
 /** Prunes any active effect sourced from, OR targeting, pid/slot — called
  *  whenever a card leaves that field slot. Covers both directions: a
  *  removed SOURCE's aura must not linger (Gargoyle leaving the field), and
  *  a removed TARGET's effect entry must not go stale and silently apply to
- *  whatever card is later played into that same slot. */
+ *  whatever card is later played into that same slot. Applies each pruned
+ *  effect's BP correction first (e.g. if a Mystical Blue Flame buff's
+ *  source is removed early, the +1 it applied must not be stuck forever). */
 function expireEffectsForSlot(G: ShadowkhanG, pid: string, slot: number): void {
-  G.public.activeEffects = G.public.activeEffects.filter(
-    (e) => !((e.sourcePid === pid && e.sourceSlot === slot) || (e.targetPid === pid && e.targetSlot === slot))
-  );
+  const remaining: ActiveEffect[] = [];
+  for (const effect of G.public.activeEffects) {
+    const matches =
+      (effect.sourcePid === pid && effect.sourceSlot === slot) ||
+      (effect.targetPid === pid && effect.targetSlot === slot);
+    if (matches) {
+      applyExpiryCorrection(G, effect);
+    } else {
+      remaining.push(effect);
+    }
+  }
+  G.public.activeEffects = remaining;
 }
 
-/** Prunes any active effect whose turn-based duration has elapsed. Called
- *  once from turn.onEnd, after turnsTaken has been incremented for the
- *  player whose turn just ended. */
+/** Prunes any active effect whose turn-based duration has elapsed, applying
+ *  its BP correction (if any) first. Called once from turn.onEnd, after
+ *  turnsTaken has been incremented for the player whose turn just ended. */
 export function expireTimedEffects(G: ShadowkhanG): void {
   const globalTurns = G.public.turnsTaken['0'] + G.public.turnsTaken['1'];
-  G.public.activeEffects = G.public.activeEffects.filter(
-    (e) => e.expiresAtGlobalTurn === undefined || e.expiresAtGlobalTurn > globalTurns
-  );
+  const remaining: ActiveEffect[] = [];
+  for (const effect of G.public.activeEffects) {
+    if (effect.expiresAtGlobalTurn !== undefined && effect.expiresAtGlobalTurn <= globalTurns) {
+      applyExpiryCorrection(G, effect);
+    } else {
+      remaining.push(effect);
+    }
+  }
+  G.public.activeEffects = remaining;
 }
 
 /** Mechanical "make it gone": banishes the card at pid/slot. No hook check,
@@ -1252,10 +1332,24 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
   // by +1 ... / [1] Restore the BP of one of your Battle Cards to its
   // original BP ..." Usable only on Battle Cards with BP<=6. A chooseAbility
   // entry, chaining into an ownField target pick for whichever branch was
-  // picked. CAVEAT: both branches apply immediately in this pass — the
-  // printed "until end of your turn" (branch 0) and "at the end of your
-  // opponent's turn after activated" delay (branch 1) aren't modeled; there's
-  // no temporary/delayed-effect scheduler yet.
+  // picked. Both branches are now timed ActiveEffects (same turn-counting
+  // math as Sk-12), reusing hasActiveEffect's registry rather than a
+  // parallel mechanism — see the 'bpModifier' EffectKind and
+  // ActiveEffect.onExpire in state.ts, applied by applyExpiryCorrection.
+  //
+  // The two branches name DIFFERENT windows and are implemented differently
+  // as a result:
+  //  - branch 0 ("+1 BP ... until the end of YOUR turn"): the buff applies
+  //    NOW (this is still the activating player's own turn in progress) and
+  //    reverts when THAT SAME turn ends — one onEnd away, so
+  //    expiresAtGlobalTurn = globalTurns + 1 (not +2 — this window is
+  //    shorter than Sk-12's "until the end of the opponent's turn", it ends
+  //    at the end of the activator's OWN current turn).
+  //  - branch 1 ("Restore ... at the end of YOUR OPPONENT'S turn after this
+  //    card is activated"): this phrasing matches Sk-12's exactly, so it
+  //    uses the same expiresAtGlobalTurn = globalTurns + 2. Nothing happens
+  //    at creation — the restoration itself IS the delayed event named in
+  //    the text, not a reversal of something applied now.
   'Sk-13': {
     a: {
       needsChoice: true,
@@ -1273,26 +1367,47 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
     },
     'a-target-buff': {
       needsChoice: true,
-      prompt: 'Choose one of your Battle Cards (BP 6 or less) to gain +1 BP.',
-      kind: 'ownField',
-      getOptions: (G, _ctx, self) => eligibleOwnBattleCardsAtOrBelow(G, self, 6),
-      resolve: (G, _ctx, self, answer) => {
-        if (typeof answer !== 'number') return;
-        const card = G.public.field[self.pid][answer];
-        if (card) modifyBp(card, 1);
-      },
-    },
-    'a-target-restore': {
-      needsChoice: true,
-      prompt: 'Choose one of your Battle Cards (BP 6 or less) to restore to its original BP.',
+      prompt: 'Choose one of your Battle Cards (BP 6 or less) to gain +1 BP until the end of your turn.',
       kind: 'ownField',
       getOptions: (G, _ctx, self) => eligibleOwnBattleCardsAtOrBelow(G, self, 6),
       resolve: (G, _ctx, self, answer) => {
         if (typeof answer !== 'number') return;
         const card = G.public.field[self.pid][answer];
         if (!card) return;
-        const original = CARD_BY_LABEL[card.label]?.bp ?? card.currentBp;
-        modifyBp(card, original - card.currentBp);
+        modifyBp(card, 1);
+        const globalTurns = G.public.turnsTaken['0'] + G.public.turnsTaken['1'];
+        G.public.activeEffects.push({
+          kinds: ['bpModifier'],
+          targetPid: self.pid,
+          targetSlot: answer,
+          sourceLabel: 'Sk-13',
+          sourcePid: self.pid,
+          sourceSlot: self.slot,
+          expiresAtGlobalTurn: globalTurns + 1,
+          onExpire: { kind: 'revertDelta', bpDelta: 1 },
+        });
+      },
+    },
+    'a-target-restore': {
+      needsChoice: true,
+      prompt: "Choose one of your Battle Cards (BP 6 or less) to restore to its original BP at the end of your opponent's next turn.",
+      kind: 'ownField',
+      getOptions: (G, _ctx, self) => eligibleOwnBattleCardsAtOrBelow(G, self, 6),
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const card = G.public.field[self.pid][answer];
+        if (!card) return;
+        const globalTurns = G.public.turnsTaken['0'] + G.public.turnsTaken['1'];
+        G.public.activeEffects.push({
+          kinds: ['bpModifier'],
+          targetPid: self.pid,
+          targetSlot: answer,
+          sourceLabel: 'Sk-13',
+          sourcePid: self.pid,
+          sourceSlot: self.slot,
+          expiresAtGlobalTurn: globalTurns + 2,
+          onExpire: { kind: 'restoreOriginal' },
+        });
       },
     },
   },
@@ -1701,7 +1816,6 @@ export interface DeferredAbility {
 
 export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
-  { label: 'Sk-02', slot: 'a', classification: 'NOT_IMPLEMENTED', reason: 'Implemented, but outside the Ability/fireTrigger system — see interceptHandOrDeckAttack.' },
   { label: 'Sk-03', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Two independent selections, not one search: an own-field removal target (no search involved), plus a named search for War Dragon across TWO zones (face-up removed pile, which is public, OR the deck, which is secret) — dispatchSearch only takes a single zone, and folding the public removed-pile half in would silently misrepresent the other half as covered. Deferred as a whole rather than wiring the deck-only half and dropping the removed-pile branch." },
   { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which removed face-up card to return, and which field slot to return it to.' },
   { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
@@ -1710,7 +1824,6 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-08', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The play-gate (own field has Blazing Sky Goblin/Sand Squid/Battle Shock Scorpion) is now enforced via PLAY_GATES/isPlayLegal. Still unwired: 'From your deck, you may play one of the above-mentioned cards that is not already on your field' — the named-card search over the deck is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, and 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top." },
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: "Only usable on Shadow Ghost — this is a targeting/attach requirement (which field card the Power Card enhances), not a boolean state condition, so it doesn't fit PLAY_GATES's check(G, pid) => boolean shape. playCard has no attach-target parameter for Power Cards to express 'only usable on card X' at all. Excluded from this pass rather than approximated as 'Shadow Ghost merely present somewhere on the field', which would misrepresent the attachment relationship." },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "A continuous removal-immunity effect with a stated duration — the persistent-effect registry (hasActiveEffect/expiresAtGlobalTurn) added for Sk-12/Sk-22 could express it directly. Still blocked on the same unrelated gap as Sk-09a though: depends on Sk-09's attach targeting (which specific field card this protects), which isn't wired." },
-  { label: 'Sk-15', slot: 'a', classification: 'NOT_IMPLEMENTED', reason: "\"Cannot be removed by Battle Card effects\" — same shape as Sk-16b's protectedFromBattleCardRemoval flag (a simple onSummon set-and-forget, no choice involved) and could be wired the same trivial way, but doing so is outside this pass's scope (the removal-REPLACEMENT hook system); not blocked by missing machinery, just not picked up here." },
   { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },
   { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },
   { label: 'Sk-18', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select 1 of your removed cards' to copy." },

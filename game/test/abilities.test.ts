@@ -82,7 +82,14 @@ describe('Sk-11 CHOSEN CONDUIT', () => {
     expect(G().public.pendingChoice).toBeNull();
   });
 
-  test('5. with only one own Battle Card, playing Sk-11 opens no prompt and changes nothing', () => {
+  // UPDATED this pass: Sk-11a's "can only play with 2+ Battle Cards" is now
+  // enforced via PLAY_GATES (matching Sk-03a/08a/10a/16a), so playing it
+  // with only one is now a rejected INVALID_MOVE rather than a card that
+  // gets placed and silently does nothing. Previously this test asserted
+  // the OLD (inconsistent) behavior: field['0'][1]?.label === 'Sk-11' (card
+  // placed) and no other assertion on the hand. Both now change: the card
+  // is never placed, and stays in hand.
+  test('5. with only one own Battle Card, playing Sk-11 is rejected (INVALID_MOVE): card stays in hand, field unchanged', () => {
     const { client, G } = createTestGame({
       players: {
         '0': { field: ['Sk-14'], hand: ['Sk-11'] },
@@ -95,7 +102,8 @@ describe('Sk-11 CHOSEN CONDUIT', () => {
     expect(G().public.pendingChoice).toBeNull();
     expect(G().public.field['0'][0]?.label).toBe('Sk-14');
     expect(G().public.field['0'][0]?.currentBp).toBe(8);
-    expect(G().public.field['0'][1]?.label).toBe('Sk-11');
+    expect(G().public.field['0'][1]).toBeNull();
+    expect(G().secret.hands['0']).toEqual(['Sk-11']);
     expect(G().public.banished['0']).toEqual([]);
   });
 });
@@ -1173,5 +1181,126 @@ describe('persistent effects: unaffected actions are unchanged', () => {
     // The unrelated lock on slot 0 is untouched by this attack.
     expect(G().public.field['1'][0]?.label).toBe('Sk-29');
     expect(G().public.activeEffects).toHaveLength(1);
+  });
+});
+
+describe('Sk-13 MYSTICAL BLUE FLAME POWER CARD (timed BP effects)', () => {
+  test('58. branch 0: +1 BP applies immediately, then reverts at the end of the activating turn and does not persist beyond it', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-27'], hand: ['Sk-13'] }, // Sk-27: BP 5, eligible (<=6)
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1); // Sk-13 into slot 1
+    client.moves.resolveChoice(0); // branch 0: +1 BP buff
+    client.moves.resolveChoice(0); // target slot 0 (Sk-27)
+
+    // Applies immediately.
+    expect(G().public.field['0'][0]?.currentBp).toBe(6);
+    const effects = G().public.activeEffects;
+    expect(effects).toHaveLength(1);
+    expect(effects[0]).toMatchObject({
+      kinds: ['bpModifier'],
+      targetPid: '0',
+      targetSlot: 0,
+      sourceLabel: 'Sk-13',
+      onExpire: { kind: 'revertDelta', bpDelta: 1 },
+    });
+
+    client.moves.endTurn(); // ends the activating player's own turn — the stated expiry
+
+    expect(G().public.field['0'][0]?.currentBp).toBe(5); // reverted, does not persist
+    expect(G().public.activeEffects).toEqual([]);
+  });
+
+  test('59. branch 1: restoring to original BP does NOT happen immediately', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [{ label: 'Sk-27', currentBp: 3 }], hand: ['Sk-13'] }, // printed BP 5, currently 3
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1); // Sk-13 into slot 1
+    client.moves.resolveChoice(1); // branch 1: restore
+    client.moves.resolveChoice(0); // target slot 0 (Sk-27)
+
+    // NOT applied yet — the restoration itself is the delayed event.
+    expect(G().public.field['0'][0]?.currentBp).toBe(3);
+    const effects = G().public.activeEffects;
+    expect(effects).toHaveLength(1);
+    expect(effects[0]).toMatchObject({
+      kinds: ['bpModifier'],
+      targetPid: '0',
+      targetSlot: 0,
+      sourceLabel: 'Sk-13',
+      onExpire: { kind: 'restoreOriginal' },
+    });
+  });
+
+  test('60. branch 1: restore fires at the stated time (end of the opponent\'s next turn), a longer window than branch 0', () => {
+    const { G } = createTestGame({
+      players: {
+        '0': { field: [{ label: 'Sk-27', currentBp: 3 }], turnsTaken: 1 },
+        '1': { field: [], turnsTaken: 0 },
+      },
+      // Dispatches exactly one endTurn (player 0's) during setup. Starting
+      // turnsTaken at 1 means that single crossing reaches globalTurns 2,
+      // matching expiresAtGlobalTurn below (calibrated as if Sk-13 had been
+      // activated back when globalTurns was 0 — the real "+2" formula).
+      currentPlayer: '1',
+      activeEffects: [
+        {
+          kinds: ['bpModifier'],
+          targetPid: '0',
+          targetSlot: 0,
+          sourceLabel: 'Sk-13',
+          sourcePid: '0',
+          sourceSlot: 1,
+          expiresAtGlobalTurn: 2,
+          onExpire: { kind: 'restoreOriginal' },
+        },
+      ],
+    });
+
+    expect(G().public.field['0'][0]?.currentBp).toBe(5); // restored to printed BP
+    expect(G().public.activeEffects).toEqual([]);
+  });
+});
+
+describe('Sk-15a SHADOW GHOST (removal immunity)', () => {
+  test('61. a Battle Card (combat) removal is blocked', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-15'], turnsTaken: 1 },
+        '1': { field: ['Sk-16'] }, // BP 9 — would normally remove Sk-15 (BP 7) as the losing attacker
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-15 into slot 0 — fires onSummon
+    expect(G().public.field['0'][0]?.protectedFromBattleCardRemoval).toBe(true);
+
+    client.moves.attackBattleCard(0, 0);
+
+    expect(G().public.field['0'][0]?.label).toBe('Sk-15'); // still there, unremoved
+    expect(G().public.banished['0']).not.toContain('Sk-15');
+    expect(G().public.pendingChoice).toBeNull();
+  });
+
+  test('62. a non-Battle-Card (ability) removal still works on it', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-05'] }, // Divine Sky Strike — an Action Card ability
+        '1': { field: [{ label: 'Sk-15', protectedFromBattleCardRemoval: true }] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-05
+    client.moves.resolveChoice(0); // target Sk-15
+
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-15');
   });
 });

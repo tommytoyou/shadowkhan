@@ -24,12 +24,24 @@ export type PendingChoiceKind =
   | 'yesNo'
   | 'chooseAbility';
 
-/** What an active persistent effect restricts on its target. Distinct kinds
- *  (rather than one blanket "locked") so a narrow effect like Gargoyle's
- *  adjacency lock ("cannot attack") doesn't accidentally also block
- *  "be attacked" or "use card effects" the way Curse of Stone's full lock
- *  does. */
-export type EffectKind = 'cannotAttack' | 'cannotBeAttacked' | 'cannotUseEffects';
+/** What an active persistent effect restricts (or, for 'bpModifier', changes
+ *  the stats of) on its target. Distinct kinds (rather than one blanket
+ *  "locked") so a narrow effect like Gargoyle's adjacency lock ("cannot
+ *  attack") doesn't accidentally also block "be attacked" or "use card
+ *  effects" the way Curse of Stone's full lock does. */
+export type EffectKind = 'cannotAttack' | 'cannotBeAttacked' | 'cannotUseEffects' | 'bpModifier';
+
+/** What happens to the target's currentBp when a 'bpModifier' effect
+ *  expires (or is pruned early because its source/target left the field):
+ *  'revertDelta' subtracts bpDelta back off — undoing a buff that was
+ *  applied immediately at creation time (Sk-13b: "+1 until end of turn").
+ *  'restoreOriginal' sets currentBp to the target's own printed BP — for an
+ *  effect that changes nothing at creation and instead performs the whole
+ *  action at expiry (Sk-13c: "restore ... at the end of ... turn", i.e. the
+ *  restoration itself is the delayed event, not a reversal of one). */
+export type BpExpiryCorrection =
+  | { kind: 'revertDelta'; bpDelta: number }
+  | { kind: 'restoreOriginal' };
 
 /** A persistent, ongoing effect applied by one field card to another (or to
  *  itself), tracked in G.public so it's visible to both players and never
@@ -49,6 +61,10 @@ export interface ActiveEffect {
    *  at turn.onEnd, after incrementing). Omitted for an effect that only
    *  expires when its source/target leaves the field. */
   expiresAtGlobalTurn?: number;
+  /** For a 'bpModifier' effect: the BP correction to apply to the target
+   *  when this effect is pruned, whether by reaching expiresAtGlobalTurn or
+   *  by the source/target leaving the field early. Absent for non-BP kinds. */
+  onExpire?: BpExpiryCorrection;
 }
 
 export interface PendingChoice {
