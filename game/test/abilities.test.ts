@@ -253,3 +253,70 @@ describe('Sk-05a DIVINE SKY STRIKE', () => {
     expect(G().public.field['0'][0]?.label).toBe('Sk-05');
   });
 });
+
+describe('Sk-24a BLAZING SKY GOBLIN', () => {
+  test('13. Sand Squid on own field and A Sinister Alliance in deck: fires and adds it to hand', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21'], hand: ['Sk-24'], deck: ['Sk-08', 'Sk-01'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1); // play Sk-24 into slot 1 (Sk-21 already in slot 0)
+
+    const yesNo = G().public.pendingChoice;
+    expect(yesNo).not.toBeNull();
+    expect(yesNo?.kind).toBe('yesNo');
+
+    client.moves.resolveChoice(true);
+
+    // Named search over a singleton deck: exactly one match, so it applies
+    // immediately — no second prompt.
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.deckCounts['0']).toBe(1);
+    expect(G().public.handCounts['0']).toBe(1);
+    expect(G().secret.hands['0']).toEqual(['Sk-08']);
+  });
+
+  test("14. deck has no A Sinister Alliance: resolves silently, no prompt opens", () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21'], hand: ['Sk-24'], deck: ['Sk-01', 'Sk-02'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.handCounts['0']).toBe(0);
+    expect(G().public.deckCounts['0']).toBe(2);
+  });
+
+  test('15. deck search never leaks the opponent\'s deck (order or contents) into this payload', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21'], hand: ['Sk-24'], deck: ['Sk-08', 'Sk-27'] },
+        '1': { field: [], hand: ['Sk-29'], deck: ['Sk-02', 'Sk-03', 'Sk-04'] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+
+    // yesNo carries no numeric options at all, so nothing deck-derived is on
+    // the public choice; and the opponent's own secret zones are absent from
+    // this (player '0') client's payload throughout, per playerView.
+    expect(G().public.pendingChoice?.kind).toBe('yesNo');
+    expect(G().public.pendingChoice?.options).toBeNull();
+    expect(G().secret.decks['1']).toBeUndefined();
+    expect(G().secret.hands['1']).toBeUndefined();
+
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.decks['1']).toBeUndefined();
+    expect(G().secret.hands['1']).toBeUndefined();
+    expect(G().secret.hands['0']).toContain('Sk-08');
+  });
+});

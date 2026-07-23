@@ -119,6 +119,19 @@ export function insertIntoOpponentDeck(
   deck.splice(index, 0, label);
 }
 
+/** Removes the card at `deckIndex` from owner's deck and adds it to their
+ *  hand — the "found it, take it" action shared by every deck-search
+ *  ability that retrieves a card. See dispatchSearch below. */
+export function moveDeckCardToHand(
+  G: ShadowkhanG,
+  owner: string,
+  deckIndex: number
+): void {
+  const deck = G.secret.decks[owner];
+  const [label] = deck.splice(deckIndex, 1);
+  G.secret.hands[owner].push(label);
+}
+
 // ---------------------------------------------------------------------------
 // Ability data — the executable layer. Keyed by card label, kept separate
 // from cards.ts so the human-readable `effects` text there stays untouched.
@@ -360,6 +373,39 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
+  // Sk-24 BLAZING SKY GOBLIN: "If you play this card while Sand Squid or
+  // Battle Shock Scorpion is on your field, you can add A Sinister Alliance
+  // from your deck to your hand." Optional ("you can"), named deck search —
+  // same CHOICE_READY pre-check shape as Sk-05/Sk-10/Sk-11/Sk-25: check the
+  // board condition AND that the deck actually holds a copy before opening
+  // the yesNo at all. The search itself (and the "found it, take it" step)
+  // runs through the generic dispatchSearch primitive.
+  'Sk-24': [
+    {
+      slot: 'a',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const field = G.public.field[self.pid];
+        const hasAlly = field.some(
+          (c) =>
+            c &&
+            (CARD_BY_LABEL[c.label]?.name === 'SAND SQUID' ||
+              CARD_BY_LABEL[c.label]?.name === 'BATTLE SHOCK SCORPION')
+        );
+        if (!hasAlly) return;
+        const matches = searchIndices(
+          G,
+          'deck',
+          self.pid,
+          (label) => CARD_BY_LABEL[label]?.name === 'A SINISTER ALLIANCE'
+        );
+        if (matches.length === 0) return;
+        openChoice(G, ctx, self, 'Sk-24', 'a-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-24']['a-confirm']);
+      },
+    },
+  ],
+
   // Sk-25 BATTLE SHOCK SCORPION: "If this card removes a Battle Card, you can
   // remove the top card from your opponent's deck." "You can" = optional —
   // dispatch a yesNo confirm, but only if the opponent's deck actually has a
@@ -466,6 +512,85 @@ function willHaveLegalOutcome(
   if (!next) return true;
   const options = next.getOptions(G, ctx, self);
   return options === null || options.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Named/attribute card search primitive. A single reusable engine for every
+// ability whose effect text is "find a card by name/type/BP/tier in a hand
+// or deck" — one generic mechanism, no per-card search logic.
+// ---------------------------------------------------------------------------
+
+export type SearchZone = 'deck' | 'hand';
+
+/** Scans `owner`'s deck or hand and returns the zone-relative indices of
+ *  entries matching `predicate`, in zone order. This is the only place that
+ *  reads a deck or hand array for search purposes — every search ability
+ *  composes it instead of poking G.secret directly. */
+function searchIndices(
+  G: ShadowkhanG,
+  zone: SearchZone,
+  owner: string,
+  predicate: (label: string) => boolean
+): number[] {
+  const source = zone === 'deck' ? G.secret.decks[owner] : G.secret.hands[owner];
+  return source
+    .map((label, i) => (predicate(label) ? i : null))
+    .filter((i): i is number => i !== null);
+}
+
+/**
+ * Runs a search over `zone` and drives it through the pendingChoice system
+ * per the zero/one/many rule:
+ *  - zero matches: no-op (silent fizzle — the same zero-target gate as
+ *    everywhere else in this file).
+ *  - exactly one match: applies immediately via `apply`, no prompt.
+ *  - more than one match: opens a real choice among the matches.
+ *
+ * CRITICAL: deck order is secret state (G.secret) and must never reach
+ * G.public — but every pendingChoice is broadcast to both players via
+ * G.public.pendingChoice. So when `zone` is 'deck', the opened choice's
+ * `options` are ORDINAL positions within the match list (0, 1, 2, ... —
+ * "the 1st/2nd/3rd match"), never real deck indices. `resolve` re-derives
+ * the real index by re-running the identical search against the secret deck
+ * at answer time — safe, because no other move can run while a
+ * pendingChoice is open, so the deck can't have changed underneath it. Hand
+ * search reuses the same ordinal scheme for uniformity, even though a hand
+ * search would be safe to reveal real indices for (it's already visible to
+ * its own owner via playerView) — one code path, not two.
+ */
+function dispatchSearch(
+  G: ShadowkhanG,
+  ctx: unknown,
+  self: AbilitySelf,
+  label: string,
+  key: string,
+  zone: SearchZone,
+  owner: string,
+  predicate: (label: string) => boolean,
+  prompt: string,
+  apply: (G: ShadowkhanG, owner: string, realIndex: number) => void
+): void {
+  const matches = searchIndices(G, zone, owner, predicate);
+  if (matches.length === 0) return;
+  if (matches.length === 1) {
+    apply(G, owner, matches[0]);
+    return;
+  }
+  const searchChoice: ChoiceAbility = {
+    needsChoice: true,
+    prompt,
+    kind: 'chooseAbility',
+    getOptions: (G2) => searchIndices(G2, zone, owner, predicate).map((_, i) => i),
+    resolve: (G2, _ctx2, _self2, answer) => {
+      if (typeof answer !== 'number') return;
+      const fresh = searchIndices(G2, zone, owner, predicate);
+      const realIndex = fresh[answer];
+      if (realIndex === undefined) return;
+      apply(G2, owner, realIndex);
+    },
+  };
+  (CHOICE_ABILITIES_BY_LABEL[label] ??= {})[key] = searchChoice;
+  openChoice(G, ctx, self, label, key, searchChoice);
 }
 
 function eligibleOwnBattleCardsAtOrBelow(
@@ -719,6 +844,36 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
     },
   },
 
+  // Sk-24 BLAZING SKY GOBLIN confirm step. Only reachable via the dispatcher
+  // in ABILITIES_BY_LABEL['Sk-24'] above. On Yes, hands off to the generic
+  // search primitive: with a singleton 30-card deck a named search can only
+  // ever find 0 or 1 copies, so this always applies immediately with no
+  // further prompt — the "more than one match" branch of dispatchSearch
+  // exists for future BP/type-based searches, not this card.
+  'Sk-24': {
+    'a-confirm': {
+      needsChoice: true,
+      prompt: "Blazing Sky Goblin: add A Sinister Alliance from your deck to your hand?",
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, ctx, self, answer) => {
+        if (answer !== true) return;
+        dispatchSearch(
+          G,
+          ctx,
+          self,
+          'Sk-24',
+          'a-search',
+          'deck',
+          self.pid,
+          (label) => CARD_BY_LABEL[label]?.name === 'A SINISTER ALLIANCE',
+          'Choose which A Sinister Alliance to add to your hand.',
+          moveDeckCardToHand
+        );
+      },
+    },
+  },
+
   // Sk-10 CYCLO OPTIC BEAM target-selection steps. Only reachable via the
   // dispatcher in ABILITIES_BY_LABEL['Sk-10'] above (neither entry has a
   // `trigger`, so fireTrigger never opens them directly).
@@ -863,13 +1018,13 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
   { label: 'Sk-02', slot: 'a', classification: 'NOT_IMPLEMENTED', reason: 'Implemented, but outside the Ability/fireTrigger system — see interceptHandOrDeckAttack.' },
   { label: 'Sk-03', slot: 'a', classification: 'GATE', reason: 'Play requirement (Sage of Dark Omen on field) not enforced — playCard has no per-card legality gates.' },
-  { label: 'Sk-03', slot: 'b', classification: 'NEEDS_CHOICE', reason: 'Select which of your own field cards to remove, and whether War Dragon comes from the removed pile or the deck.' },
+  { label: 'Sk-03', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Two independent selections, not one search: an own-field removal target (no search involved), plus a named search for War Dragon across TWO zones (face-up removed pile, which is public, OR the deck, which is secret) — dispatchSearch only takes a single zone, and folding the public removed-pile half in would silently misrepresent the other half as covered. Deferred as a whole rather than wiring the deck-only half and dropping the removed-pile branch." },
   { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which removed face-up card to return, and which field slot to return it to.' },
-  { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select a BP<=8 Battle Card from your deck.' },
+  { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
   { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Select hand/deck cards to remove equal to the selected card's BP; also needs a delayed 'start of next turn' summon not currently modeled." },
   { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select 10 of your face-up removed cards' — optional, multi-select." },
   { label: 'Sk-07', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you may place it at the bottom of your deck' — optional." },
-  { label: 'Sk-08', slot: 'a', classification: 'GATE', reason: "Play requirement not enforced; 'you may play one of the above from your deck' needs deck search + choice." },
+  { label: 'Sk-08', slot: 'a', classification: 'GATE', reason: "Play requirement not enforced. The named-card search over the deck (one of 3 names) is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, but 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top. Beyond a single search + apply." },
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: 'Only usable on Shadow Ghost — Power Cards have no attach-target parameter in playCard yet.' },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-09's attach targeting, which isn't wired." },
   { label: 'Sk-10', slot: 'a', classification: 'GATE', reason: 'Play requirement (One Eyed Mechanical Monster on field) not enforced.' },
@@ -885,11 +1040,10 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-18', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-18a's selection." },
   { label: 'Sk-19', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'it may remain on the field instead' — optional replacement." },
   { label: 'Sk-20', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may remove 3 cards from your hand...' — optional, multi-select." },
-  { label: 'Sk-20', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Self-activated ability with no explicit trigger — needs a new 'activate' move not yet supported; also searches the deck for a named card." },
+  { label: 'Sk-20', slot: 'b', classification: 'NEEDS_CHOICE', reason: "The named search (Arrival Of Doom from your deck) is expressible with dispatchSearch, but the ability has no trigger event to fire it from — it's self-activated at will, and the Trigger union's 'onActivate' has no move in game.ts that ever calls fireTrigger(..., 'onActivate', ...). Needs a new activate move (game.ts), out of scope for an effects.ts-only search primitive." },
   { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select...call it correctly' — optional guessing minigame." },
   { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome." },
-  { label: 'Sk-23', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which hand card to discard and which deck card of matching type to retrieve.' },
-  { label: 'Sk-24', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can add A Sinister Alliance from your deck' — optional." },
+  { label: 'Sk-23', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The discard (any own hand card — no predicate) and the matching-type deck retrieval are each expressible on their own (ownHandIndex + dispatchSearch), but like Sk-20b this ability has no trigger event — it's a standalone activated ability, not tied to onSummon/onBattleWin/etc. — and needs the same not-yet-built 'activate' move. (The 'cannot play the selected card this turn' restriction is also unmodeled — hand cards carry no per-turn lock state — but that alone wouldn't have blocked wiring.)" },
   { label: 'Sk-25', slot: 'b', classification: 'NEEDS_CHOICE', reason: "'you can remove face down one Action Card...' — optional, selects a hand card." },
   { label: 'Sk-25', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you can add one face-up removed Action Card...' — optional, selects from the removed pool." },
   { label: 'Sk-26', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can select one Battle Card...place it under this card' — optional target selection; also needs a new 'cards attached under this card' mechanic." },
