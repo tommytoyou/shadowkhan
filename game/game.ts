@@ -17,6 +17,7 @@ import {
   discardOwnHandCard,
   hasActiveEffect,
   expireTimedEffects,
+  placeCardOnField,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -59,6 +60,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         field: { '0': [null, null, null], '1': [null, null, null] },
         banished: { '0': [], '1': [] },
         banishedFaceDown: { '0': 0, '1': 0 },
+        banishedFromField: { '0': [], '1': [] },
         turnsTaken: { '0': 0, '1': 0 },
         bottomUpUsed: { '0': false, '1': false },
         attackedThisTurn: false,
@@ -144,14 +146,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         if (!isPlayLegal(G, pid, label)) return INVALID_MOVE;
 
         hand.splice(handIndex, 1);
-        G.public.field[pid][slot] = {
-          label,
-          currentBp: card.bp ?? 0,
-          attached: [],
-          turnsOnField: 0,
-        };
-        syncCounts(G);
-        fireTrigger(G, { ctx, random }, 'onSummon', { pid, slot });
+        placeCardOnField(G, { ctx, random }, pid, slot, label);
       },
     },
 

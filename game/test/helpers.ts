@@ -40,6 +40,12 @@ export interface PlayerPositionSpec {
    *  assert that face-down removals never leak into a face-up-only search
    *  (see the 'removed' zone in effects.ts) regardless of how many there are. */
   banishedFaceDown?: number;
+  /** Subset of `banished` (by label) tagged as removed FROM THIS PLAYER'S
+   *  OWN FIELD specifically — G.public.banishedFromField. Defaults to [].
+   *  Every label listed here must also appear in `banished`; seedable so a
+   *  test can distinguish a field-origin removed card (Sk-04a's target)
+   *  from a hand/deck-origin one sitting in the same pile. */
+  banishedFromField?: string[];
 }
 
 export interface BoardPositionSpec {
@@ -114,6 +120,7 @@ function buildG(spec: BoardPositionSpec): ShadowkhanG {
       field: { '0': buildField(p0.field), '1': buildField(p1.field) },
       banished: { '0': [...(p0.banished ?? [])], '1': [...(p1.banished ?? [])] },
       banishedFaceDown: { '0': p0.banishedFaceDown ?? 0, '1': p1.banishedFaceDown ?? 0 },
+      banishedFromField: { '0': [...(p0.banishedFromField ?? [])], '1': [...(p1.banishedFromField ?? [])] },
       turnsTaken: { '0': p0.turnsTaken ?? 0, '1': p1.turnsTaken ?? 0 },
       bottomUpUsed: { '0': false, '1': false },
       attackedThisTurn: spec.attackedThisTurn ?? false,

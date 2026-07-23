@@ -1833,3 +1833,138 @@ describe('Sk-07a ACE IN THE HOLE (onDraw, last card of the deck)', () => {
     expect(player1View.secret.decks['1']).toEqual([]);
   });
 });
+
+describe('Sk-04a PURGATORY UNDONE (field placement, removed pile)', () => {
+  test('76. full chain: multi-match search exposes REAL removed-pile indices (public zone), then auto-places into the one empty slot and fires onSummon', () => {
+    const { client, G } = createTestGame({
+      players: {
+        // Sk-29 is present but NOT field-origin (filler, at real index 0);
+        // Sk-01 and Sk-02 (real indices 1, 2) ARE field-origin. If this zone
+        // used ordinal-secrecy the choice would read [0, 1] instead.
+        '0': { field: ['Sk-20', null, null], hand: ['Sk-04'], banished: ['Sk-29', 'Sk-01', 'Sk-02'], banishedFromField: ['Sk-01', 'Sk-02'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1); // Sk-04 into the only-but-one empty slot; slot 2 stays empty
+
+    const searchPending = G().public.pendingChoice;
+    expect(searchPending).not.toBeNull();
+    expect(searchPending?.kind).toBe('chooseAbility');
+    expect(searchPending?.options).toEqual([1, 2]); // real indices, not ordinal [0, 1]
+
+    client.moves.resolveChoice(1); // choose Sk-01 (real index 1)
+
+    // Sk-01's own onSummon (RULES OF ENGAGEMENT) sets a global flag — the
+    // clearest available proof that placement fires onSummon like a normal
+    // play, since placeCardOnField is the exact function playCard itself
+    // uses (see its doc comment in effects.ts). No prior test used Sk-01's
+    // onSummon this way; single-slot placement needed no further prompt.
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][2]?.label).toBe('Sk-01');
+    expect(G().public.rulesOfEngagementActive).toBe(true);
+    expect(G().public.banished['0']).toEqual(['Sk-29', 'Sk-02']);
+    expect(G().public.banishedFromField['0']).toEqual(['Sk-02']);
+  });
+
+  test('77. no field-origin removed card available: resolves silently, even though the removed pile is non-empty', () => {
+    const { client, G } = createTestGame({
+      players: {
+        // Sk-29 is in the removed pile but was removed from HAND or DECK,
+        // not field — untagged, so it must not be selectable.
+        '0': { field: ['Sk-20', null, null], hand: ['Sk-04'], banished: ['Sk-29'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][1]?.label).toBe('Sk-04');
+    expect(G().public.field['0'][2]).toBeNull(); // nothing was placed
+    expect(G().public.banished['0']).toEqual(['Sk-29']); // untouched
+  });
+
+  test('78. own field already full when Sk-04 is played: the pre-check fizzles before any prompt, even with an eligible removed card waiting', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20', 'Sk-29', null], hand: ['Sk-04'], banished: ['Sk-01'], banishedFromField: ['Sk-01'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 2); // fills the last empty slot with Sk-04 itself
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][2]?.label).toBe('Sk-04');
+    expect(G().public.banished['0']).toEqual(['Sk-01']); // untouched — nowhere to put it
+  });
+});
+
+describe('Sk-08a A SINISTER ALLIANCE (field placement, deck search)', () => {
+  test('79. full chain: multi-match deck search keeps ORDINAL secrecy (secret zone), then auto-places into the one empty slot', () => {
+    const { client, G } = createTestGame({
+      players: {
+        // Sk-01 (real index 0) is not an ally and must never be offered.
+        // Sk-25 and Sk-24 (real indices 1, 2) are the two eligible allies.
+        '0': { field: ['Sk-21', null, null], hand: ['Sk-08'], deck: ['Sk-01', 'Sk-25', 'Sk-24'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1); // Sk-08 into slot 1; slot 2 stays empty
+
+    const confirm = G().public.pendingChoice;
+    expect(confirm?.kind).toBe('yesNo');
+    expect(confirm?.sourceLabel).toBe('Sk-08');
+    expect(confirm?.abilitySlot).toBe('a-confirm');
+
+    client.moves.resolveChoice(true);
+
+    const searchPending = G().public.pendingChoice;
+    expect(searchPending).not.toBeNull();
+    expect(searchPending?.kind).toBe('chooseAbility');
+    // Ordinal positions within the match list (the 1st and 2nd matches),
+    // NOT the real deck indices [1, 2] — deck is secret, unlike 'removed'.
+    expect(searchPending?.options).toEqual([0, 1]);
+    expect(G().secret.decks['1']).toBeUndefined(); // opponent's deck never leaks
+
+    client.moves.resolveChoice(0); // the 1st match: Sk-25
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][2]?.label).toBe('Sk-25');
+    expect(G().secret.decks['0']).toEqual(['Sk-01', 'Sk-24']); // Sk-25 removed, order preserved
+  });
+
+  test('80. declining the optional prompt leaves the deck and field untouched', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21', null, null], hand: ['Sk-08'], deck: ['Sk-25'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+    client.moves.resolveChoice(false);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.decks['0']).toEqual(['Sk-25']);
+    expect(G().public.field['0'][1]?.label).toBe('Sk-08');
+    expect(G().public.field['0'][2]).toBeNull();
+  });
+
+  test('81. no eligible ally in the deck: resolves silently, no prompt opens', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21', null, null], hand: ['Sk-08'], deck: ['Sk-01'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][1]?.label).toBe('Sk-08');
+    expect(G().secret.decks['0']).toEqual(['Sk-01']);
+  });
+});

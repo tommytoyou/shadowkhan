@@ -241,6 +241,42 @@ export function moveDeckCardToHand(
   G.secret.hands[owner].push(label);
 }
 
+/** Places `label` onto pid's field at `slot` and fires onSummon for it — the
+ *  EXACT construction/sequencing playCard's own move body uses (see
+ *  playCard in game.ts), factored out so an ability-driven placement (Sk-04a
+ *  returning a removed card to the field, Sk-08a playing a searched one) is
+ *  indistinguishable from a normally-played card: same FieldCard shape, same
+ *  syncCounts call, same onSummon firing. One placement mechanism, not a
+ *  parallel one — playCard itself now calls this too. Caller's
+ *  responsibility to have already confirmed `slot` is empty and `label`'s
+ *  source zone has been emptied of it (removed pile, deck, etc.). */
+export function placeCardOnField(
+  G: ShadowkhanG,
+  ctx: EngineCtx,
+  pid: string,
+  slot: number,
+  label: string
+): void {
+  const printed = CARD_BY_LABEL[label];
+  G.public.field[pid][slot] = {
+    label,
+    currentBp: printed?.bp ?? 0,
+    attached: [],
+    turnsOnField: 0,
+  };
+  syncCounts(G);
+  fireTrigger(G, ctx, 'onSummon', { pid, slot });
+}
+
+/** Purges `label` from owner's banishedFromField, if present — called
+ *  wherever a label leaves `banished`, so the tag never outlives the removed
+ *  card it describes (see banishedFromField's doc comment in state.ts). */
+function untagBanishedFromField(G: ShadowkhanG, owner: string, label: string): void {
+  const tagged = G.public.banishedFromField[owner];
+  const idx = tagged.indexOf(label);
+  if (idx !== -1) tagged.splice(idx, 1);
+}
+
 /** Removes the label at `index` from owner's own face-up removed pile
  *  (G.public.banished) and returns it, so the caller can place it wherever
  *  the specific card's text says (hand, field, deck) — there's no single
@@ -255,6 +291,7 @@ export function removeFromOwnRemovedPile(
   const pile = G.public.banished[owner];
   if (index < 0 || index >= pile.length) return undefined;
   const [label] = pile.splice(index, 1);
+  untagBanishedFromField(G, owner, label);
   return label;
 }
 
@@ -273,6 +310,7 @@ export function removeMultipleFromOwnRemovedPile(
     const idx = pile.indexOf(label);
     if (idx === -1) continue;
     pile.splice(idx, 1);
+    untagBanishedFromField(G, owner, label);
   }
 }
 
@@ -305,8 +343,9 @@ const PLAY_GATES: Record<string, PlayGate> = {
   // Sk-08 A SINISTER ALLIANCE: "You can only play this card if you have at
   // least one Blazing Sky Goblin, Sand Squid, or Battle Shock Scorpion on
   // your field." (The rest of that sentence — playing one of those three
-  // from your deck — is a separate, still-deferred search+play effect; this
-  // gate only covers whether Sk-08 itself may be played.)
+  // from your deck — is a separate search+play effect, wired in
+  // ABILITIES_BY_LABEL['Sk-08']; this gate only covers whether Sk-08 itself
+  // may be played.)
   'Sk-08': {
     slot: 'a',
     check: (G, pid) => {
@@ -422,6 +461,71 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
+  // Sk-04 PURGATORY UNDONE, effect a: "Add one removed face-up card that was
+  // removed from your field back to your field." Mandatory (no "may"/"can").
+  // CHOICE_READY pre-check on BOTH halves before opening anything (an empty
+  // own field slot to place into, AND a field-origin removed card to place)
+  // — same shape as Sk-05/08/10/11/20a/24/25c above, and deliberately not
+  // "search first, discover no room mid-chain": the new emptyOwnFieldSlot
+  // choice's own zero-option gate would also catch that, but checking both
+  // up front avoids answering the search question only to watch the
+  // follow-up silently do nothing.
+  // "removed from your field" is read via G.public.banishedFromField, tagged
+  // once at the sole field-removal choke point (finalizeFieldRemoval) and
+  // purged wherever a label leaves the removed pile — see state.ts. A card
+  // placed this way goes through placeCardOnField, the exact function
+  // playCard itself calls, so it fires onSummon like any other placement —
+  // there is no "entered the field without being played" concept anywhere
+  // in this engine, and the printed "back to your field" reads naturally as
+  // the same action, not a quieter variant of it.
+  'Sk-04': [
+    {
+      slot: 'a',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const hasEmptySlot = G.public.field[self.pid].some((c) => c === null);
+        if (!hasEmptySlot) return;
+        // Snapshotted as a plain array, not read live off G inside the
+        // predicate: getOptions/resolve below may run later, from a SEPARATE
+        // resolveChoice move dispatch, against a fresh Immer draft — a
+        // predicate closing over this run()'s own G would be reading a
+        // stale/revoked reference by then. A snapshot is safe because
+        // nothing can mutate banishedFromField while this pendingChoice is
+        // open (every move rejects outright while one is pending).
+        const fieldOriginLabels = [...G.public.banishedFromField[self.pid]];
+        const isFieldOrigin = (l: string) => fieldOriginLabels.includes(l);
+        const matches = searchIndices(G, 'removed', self.pid, isFieldOrigin);
+        if (matches.length === 0) return;
+        dispatchSearch(
+          G,
+          ctx,
+          self,
+          'Sk-04',
+          'a-search',
+          'removed',
+          self.pid,
+          isFieldOrigin,
+          'Purgatory Undone: choose which removed face-up card (removed from your field) to return to your field.',
+          (G2, freshCtx, owner, realIndex) => {
+            const label = removeFromOwnRemovedPile(G2, owner, realIndex);
+            if (!label) return;
+            dispatchPlacement(
+              G2,
+              freshCtx,
+              self,
+              'Sk-04',
+              'a-place',
+              owner,
+              label,
+              `Purgatory Undone: choose which empty field slot to return ${label} to.`
+            );
+          }
+        );
+      },
+    },
+  ],
+
   // Sk-05 DIVINE SKY STRIKE: "Remove one Battle Card from the field face-up."
   // Mandatory (no "may"), but which card is ambiguous — CHOICE_READY dispatch
   // pattern (same shape as Sk-10 below): check for legal targets on the
@@ -488,14 +592,48 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
-  // Sk-08 A SINISTER ALLIANCE: only the second effect is wired — "If you have
-  // all three of the above-mentioned cards on your field, their BP each
-  // becomes 9." The condition and targets are fully fixed (three named
-  // cards, no player choice). NOT implemented: the first effect (searching/
-  // playing a card from the deck — target selection), and the "until end of
-  // your turn" reversion (no temporary-effect expiry exists yet, so this
-  // pass sets BP to 9 permanently).
+  // Sk-08 A SINISTER ALLIANCE. Both halves of effect a are now wired, plus
+  // effect b unchanged.
+  // effect a, first clause (the play-gate: at least one of the three allies
+  //   already on your field to play Sk-08 at all) is enforced via
+  //   PLAY_GATES/isPlayLegal, not here.
+  // effect a, second clause ("From your deck, you may play one of the
+  //   above-mentioned cards that is not already on your field.") — optional
+  //   ("you may"). CHOICE_READY pre-check on BOTH halves (an eligible ally
+  //   in the deck AND an empty own field slot) before opening the yesNo, for
+  //   the same reason as Sk-04a above: the invariant holds for the whole
+  //   chain since no other move can run while a pendingChoice is open, so
+  //   it's safe for the search's apply step to pull the card out of the deck
+  //   before the placement step confirms a slot — dispatchPlacement's own
+  //   zero-slot fizzle is defense in depth, not the primary guard.
+  // effect b: "If you have all three of the above-mentioned cards on your
+  //   field, their BP each becomes 9." Fully fixed condition and targets, no
+  //   player choice. NOT implemented: the "until end of your turn" reversion
+  //   (no temporary-effect expiry existed when this was first wired, so it
+  //   sets BP to 9 permanently) — unrelated to this pass, left as-is.
   'Sk-08': [
+    {
+      slot: 'a',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const hasEmptySlot = G.public.field[self.pid].some((c) => c === null);
+        if (!hasEmptySlot) return;
+        const allies = ['BLAZING SKY GOBLIN', 'SAND SQUID', 'BATTLE SHOCK SCORPION'];
+        const ownFieldAllyNames = new Set(
+          G.public.field[self.pid]
+            .filter((c): c is FieldCard => c !== null)
+            .map((c) => CARD_BY_LABEL[c.label]?.name)
+            .filter((n): n is string => n !== undefined)
+        );
+        const eligible = (l: string) => {
+          const name = CARD_BY_LABEL[l]?.name;
+          return !!name && allies.includes(name) && !ownFieldAllyNames.has(name);
+        };
+        if (!G.secret.decks[self.pid].some(eligible)) return;
+        openChoice(G, ctx, self, 'Sk-08', 'a-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-08']['a-confirm']);
+      },
+    },
     {
       slot: 'b',
       trigger: 'onSummon',
@@ -749,7 +887,7 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
           self.pid,
           (label) => CARD_BY_LABEL[label]?.name === 'ARRIVAL OF DOOM',
           'Choose which Arrival Of Doom to add to your hand.',
-          moveDeckCardToHand
+          (G2, _ctx2, owner, realIndex) => moveDeckCardToHand(G2, owner, realIndex)
         );
       },
     },
@@ -833,13 +971,13 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
           self.pid,
           () => true,
           'Choose a card from your hand to discard.',
-          (G2, owner, handIndex) => {
+          (G2, freshCtx, owner, handIndex) => {
             const label = discardOwnHandCard(G2, owner, handIndex);
             const type = CARD_BY_LABEL[label]?.type;
             if (!type) return;
             dispatchSearch(
               G2,
-              ctx,
+              freshCtx,
               self,
               'Sk-23',
               'a-retrieve',
@@ -847,7 +985,7 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
               owner,
               (deckLabel) => CARD_BY_LABEL[deckLabel]?.type === type,
               'Choose a card of the same type to add to your hand.',
-              moveDeckCardToHand
+              (G3, _ctx3, owner3, realIndex) => moveDeckCardToHand(G3, owner3, realIndex)
             );
           }
         );
@@ -1188,7 +1326,7 @@ const REMOVAL_HOOKS: Record<string, RemovalHook> = {
               self2.pid,
               (label) => CARD_BY_LABEL[label]?.type === 'action',
               'Choose which Action Card to remove face down.',
-              (G3, owner, handIndex) => banishHandCardFaceDown(G3, owner, handIndex)
+              (G3, _ctx3, owner, handIndex) => banishHandCardFaceDown(G3, owner, handIndex)
             );
             return;
           }
@@ -1292,11 +1430,15 @@ export function expireTimedEffects(G: ShadowkhanG): void {
 
 /** Mechanical "make it gone": banishes the card at pid/slot. No hook check,
  *  no trigger — the low-level primitive both finishFieldRemoval and a
- *  declined replacement's own resolve() share. */
+ *  declined replacement's own resolve() share. The sole choke point for
+ *  every field removal, so it's also the single place that tags a label as
+ *  field-origin in banishedFromField (see its doc comment in state.ts) —
+ *  every other path into `banished` (hand/deck removal) leaves it untagged. */
 function finalizeFieldRemoval(G: ShadowkhanG, pid: string, slot: number): void {
   const card = G.public.field[pid][slot];
   if (!card) return;
   G.public.banished[pid].push(card.label);
+  G.public.banishedFromField[pid].push(card.label);
   G.public.field[pid][slot] = null;
   expireEffectsForSlot(G, pid, slot);
 }
@@ -1441,6 +1583,17 @@ function searchIndices(
  * indices directly, and `resolve` still re-validates against a fresh
  * search (for consistency/robustness) but skips the ordinal translation.
  */
+/**
+ * `apply` receives ctx FRESH from whichever call actually invokes it — the
+ * initiating call's own ctx for the 0/1-match fast path, or the searchChoice
+ * resolve's own ctx2 for the many-match path (which may run in a LATER,
+ * separate resolveChoice move dispatch). This matters for any apply that
+ * itself needs to chain into another ctx-dependent step (e.g.
+ * dispatchPlacement, which calls fireTrigger for the newly-placed card) —
+ * closing over the ORIGINATING call's ctx instead would hand later code a
+ * reference tied to an already-finished move dispatch. Every existing apply
+ * closure that doesn't need ctx simply ignores the extra parameter.
+ */
 function dispatchSearch(
   G: ShadowkhanG,
   ctx: EngineCtx,
@@ -1451,12 +1604,12 @@ function dispatchSearch(
   owner: string,
   predicate: (label: string) => boolean,
   prompt: string,
-  apply: (G: ShadowkhanG, owner: string, realIndex: number) => void
+  apply: (G: ShadowkhanG, ctx: EngineCtx, owner: string, realIndex: number) => void
 ): void {
   const matches = searchIndices(G, zone, owner, predicate);
   if (matches.length === 0) return;
   if (matches.length === 1) {
-    apply(G, owner, matches[0]);
+    apply(G, ctx, owner, matches[0]);
     return;
   }
   const secret = zoneIsSecret(zone);
@@ -1468,12 +1621,12 @@ function dispatchSearch(
       const real = searchIndices(G2, zone, owner, predicate);
       return secret ? real.map((_, i) => i) : real;
     },
-    resolve: (G2, _ctx2, _self2, answer) => {
+    resolve: (G2, ctx2, _self2, answer) => {
       if (typeof answer !== 'number') return;
       const fresh = searchIndices(G2, zone, owner, predicate);
       const realIndex = secret ? fresh[answer] : answer;
       if (realIndex === undefined || !fresh.includes(realIndex)) return;
-      apply(G2, owner, realIndex);
+      apply(G2, ctx2, owner, realIndex);
     },
   };
   (CHOICE_ABILITIES_BY_LABEL[label] ??= {})[key] = searchChoice;
@@ -1558,6 +1711,55 @@ function dispatchMultiSearch(
   openChoice(G, ctx, self, label, key, multiChoice, { count, exact });
 }
 
+/**
+ * Opens a placement choice among owner's own EMPTY field slots for
+ * `cardLabel`, applying it via placeCardOnField (the exact function playCard
+ * itself uses) once answered — the single placement mechanism, so a card
+ * entering the field this way is indistinguishable from one played normally,
+ * onSummon included. Mirrors dispatchSearch's own zero/one/many shape:
+ *  - zero empty slots: silent fizzle (the same zero-target gate as
+ *    everywhere else — a full field means nothing legal to choose).
+ *  - exactly one empty slot: applies immediately, no prompt.
+ *  - more than one: opens a real 'emptyOwnFieldSlot' choice among them.
+ * Always public (a field slot's occupancy is visible to both players), so —
+ * like the 'removed' zone — no ordinal-secrecy indirection is needed; the
+ * offered options are real slot indices directly.
+ */
+function dispatchPlacement(
+  G: ShadowkhanG,
+  ctx: EngineCtx,
+  self: AbilitySelf,
+  label: string,
+  key: string,
+  owner: string,
+  cardLabel: string,
+  prompt: string
+): void {
+  const emptySlots = (G2: ShadowkhanG) =>
+    G2.public.field[owner].map((c, i) => (c === null ? i : null)).filter((i): i is number => i !== null);
+
+  const slots = emptySlots(G);
+  if (slots.length === 0) return;
+  if (slots.length === 1) {
+    placeCardOnField(G, ctx, owner, slots[0], cardLabel);
+    return;
+  }
+
+  const placementChoice: ChoiceAbility = {
+    needsChoice: true,
+    prompt,
+    kind: 'emptyOwnFieldSlot',
+    getOptions: (G2) => emptySlots(G2),
+    resolve: (G2, ctx2, _self2, answer) => {
+      if (typeof answer !== 'number') return;
+      if (!emptySlots(G2).includes(answer)) return;
+      placeCardOnField(G2, ctx2, owner, answer, cardLabel);
+    },
+  };
+  (CHOICE_ABILITIES_BY_LABEL[label] ??= {})[key] = placementChoice;
+  openChoice(G, ctx, self, label, key, placementChoice);
+}
+
 function eligibleOwnBattleCardsAtOrBelow(
   G: ShadowkhanG,
   self: AbilitySelf,
@@ -1597,13 +1799,70 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
           self.pid,
           isWarDragon,
           'Arrival of Doom: add your War Dragon to your hand.',
-          (G2, owner, realIndex) => {
+          (G2, _ctx2, owner, realIndex) => {
             if (zone === 'removed') {
               const found = removeFromOwnRemovedPile(G2, owner, realIndex);
               if (found) G2.secret.hands[owner].push(found);
             } else {
               moveDeckCardToHand(G2, owner, realIndex);
             }
+          }
+        );
+      },
+    },
+  },
+
+  // Sk-08 A SINISTER ALLIANCE confirm step. Only reachable via the
+  // dispatcher in ABILITIES_BY_LABEL['Sk-08'] above. The eligible-ally
+  // predicate snapshots "which ally names are already on the field" as a
+  // plain Set at construction time (this resolve's own fresh G), rather than
+  // reading G.public.field again inside the predicate body — the predicate
+  // may be re-run later by dispatchSearch's own getOptions/resolve from a
+  // separate resolveChoice move if the deck holds more than one eligible
+  // card, and closing over a stale G there would be wrong (see dispatchSearch's
+  // own doc comment on why apply receives ctx fresh, same underlying issue).
+  'Sk-08': {
+    'a-confirm': {
+      needsChoice: true,
+      prompt: 'A Sinister Alliance: from your deck, play one of Blazing Sky Goblin, Sand Squid, or Battle Shock Scorpion that is not already on your field?',
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, ctx, self, answer) => {
+        if (answer !== true) return;
+        const allies = ['BLAZING SKY GOBLIN', 'SAND SQUID', 'BATTLE SHOCK SCORPION'];
+        const ownFieldAllyNames = new Set(
+          G.public.field[self.pid]
+            .filter((c): c is FieldCard => c !== null)
+            .map((c) => CARD_BY_LABEL[c.label]?.name)
+            .filter((n): n is string => n !== undefined)
+        );
+        const eligible = (l: string) => {
+          const name = CARD_BY_LABEL[l]?.name;
+          return !!name && allies.includes(name) && !ownFieldAllyNames.has(name);
+        };
+        dispatchSearch(
+          G,
+          ctx,
+          self,
+          'Sk-08',
+          'a-search',
+          'deck',
+          self.pid,
+          eligible,
+          'Choose which card to play from your deck.',
+          (G2, ctx2, owner, deckIndex) => {
+            const deck = G2.secret.decks[owner];
+            const [label] = deck.splice(deckIndex, 1);
+            dispatchPlacement(
+              G2,
+              ctx2,
+              self,
+              'Sk-08',
+              'a-place',
+              owner,
+              label,
+              `Choose which empty field slot to play ${label} into.`
+            );
           }
         );
       },
@@ -1989,7 +2248,7 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
           self.pid,
           (l) => CARD_BY_LABEL[l]?.type === 'action',
           'Choose which face-up removed Action Card to add to your hand.',
-          (G2, owner, realIndex) => {
+          (G2, _ctx2, owner, realIndex) => {
             const found = removeFromOwnRemovedPile(G2, owner, realIndex);
             if (found) G2.secret.hands[owner].push(found);
           }
@@ -2022,7 +2281,7 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
           self.pid,
           (label) => CARD_BY_LABEL[label]?.name === 'A SINISTER ALLIANCE',
           'Choose which A Sinister Alliance to add to your hand.',
-          moveDeckCardToHand
+          (G2, _ctx2, owner, realIndex) => moveDeckCardToHand(G2, owner, realIndex)
         );
       },
     },
@@ -2358,10 +2617,8 @@ export interface DeferredAbility {
 
 export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
-  { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search half (a named search for a removed face-up card, over the now-searchable 'removed' zone) is expressible with dispatchSearch. Still blocked: the found card must go to a PLAYER-CHOSEN empty field slot, not to hand — dispatchSearch's apply step has no destination-slot target step, and 'removed FROM YOUR FIELD specifically' (vs. removed from hand/deck) isn't tracked anywhere in G.public.banished, which stores only a label with no origin-zone metadata." },
-  { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
+  { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. This is NOT a field-placement gap (dispatchPlacement, added for Sk-04a/08a, could place it immediately) — the printed text specifically delays the summon to the start of NEXT turn, which needs a scheduler that still doesn't exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
   { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "dispatchMultiSearch (added this pass) can now express the multi-select removal itself, but 'cards equal to the selected card's BP' still needs a variable, dynamically-computed count derived from Sk-06a's own selection (which is itself blocked — see Sk-06a), and 'the selected card is considered played' at the start of your next turn still needs a delayed-trigger scheduler that doesn't exist. Multi-select alone doesn't unlock this." },
-  { label: 'Sk-08', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The play-gate (own field has Blazing Sky Goblin/Sand Squid/Battle Shock Scorpion) is now enforced via PLAY_GATES/isPlayLegal. Still unwired: 'From your deck, you may play one of the above-mentioned cards that is not already on your field' — the named-card search over the deck is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, and 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top." },
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: "Only usable on Shadow Ghost — this is a targeting/attach requirement (which field card the Power Card enhances), not a boolean state condition, so it doesn't fit PLAY_GATES's check(G, pid) => boolean shape. playCard has no attach-target parameter for Power Cards to express 'only usable on card X' at all. Excluded from this pass rather than approximated as 'Shadow Ghost merely present somewhere on the field', which would misrepresent the attachment relationship." },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "A continuous removal-immunity effect with a stated duration — the persistent-effect registry (hasActiveEffect/expiresAtGlobalTurn) added for Sk-12/Sk-22 could express it directly. Still blocked on the same unrelated gap as Sk-09a though: depends on Sk-09's attach targeting (which specific field card this protects), which isn't wired." },
   { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },

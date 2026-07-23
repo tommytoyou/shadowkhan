@@ -22,7 +22,12 @@ export type PendingChoiceKind =
   | 'opponentHandIndex'
   | 'ownHandIndex'
   | 'yesNo'
-  | 'chooseAbility';
+  | 'chooseAbility'
+  /** Choose an EMPTY own field slot as a placement destination — distinct
+   *  from 'ownField', which targets an existing (non-null) card. Offered
+   *  options are always genuinely empty, legal slots; see dispatchPlacement
+   *  in effects.ts, the single mechanism behind every card-placement effect. */
+  | 'emptyOwnFieldSlot';
 
 /** What an active persistent effect restricts (or, for 'bpModifier', changes
  *  the stats of) on its target. Distinct kinds (rather than one blanket
@@ -108,6 +113,17 @@ export interface PublicState {
   field: Record<string, (FieldCard | null)[]>;
   banished: Record<string, string[]>;
   banishedFaceDown: Record<string, number>;
+  /** Labels currently present in banished[pid] that got there via a FIELD
+   *  removal specifically (as opposed to a hand or deck removal) — the
+   *  subset Sk-04a's "removed from your field" wording needs to search. Kept
+   *  in sync at every removed-pile write: tagged once, in finalizeFieldRemoval
+   *  (the sole choke point for every field removal), and purged wherever a
+   *  label leaves `banished` (removeFromOwnRemovedPile /
+   *  removeMultipleFromOwnRemovedPile in effects.ts) — a card can't stay
+   *  tagged "field-origin" once it's no longer even in the removed pile.
+   *  Safe to key purely by label: singleton deck, so a label can only be in
+   *  the removed pile from one removal event at a time. */
+  banishedFromField: Record<string, string[]>;
   turnsTaken: Record<string, number>;
   bottomUpUsed: Record<string, boolean>;
   attackedThisTurn: boolean;
