@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { Client } from 'boardgame.io/client';
 import { createTestGame } from './helpers';
 import { ShadowkhanGame } from '../game';
+import type { ShadowkhanG } from '../state';
 
 describe('Sk-11 CHOSEN CONDUIT', () => {
   test('1. playing Sk-11 with two own Battle Cards opens an ownField choice listing both', () => {
@@ -1723,5 +1724,112 @@ describe('Sk-25c BATTLE SHOCK SCORPION (removed-pile retrieval)', () => {
     expect(G().public.pendingChoice).toBeNull();
     expect(G().secret.hands['0']).toEqual(['Sk-02']);
     expect(G().public.banishedFaceDown['0']).toBe(3); // untouched by the search
+  });
+});
+
+describe('Sk-07a ACE IN THE HOLE (onDraw, last card of the deck)', () => {
+  // Ten distinct face-up removed labels, none of which collide with any
+  // card used elsewhere in this describe block's setups.
+  const TEN_REMOVED = ['Sk-01', 'Sk-02', 'Sk-03', 'Sk-04', 'Sk-05', 'Sk-06', 'Sk-08', 'Sk-09', 'Sk-10', 'Sk-11'];
+
+  test('71. same seed produces the same shuffled deck order twice (reproducibility)', () => {
+    const setup = {
+      players: {
+        '0': { hand: [], deck: ['Sk-07'], banished: [...TEN_REMOVED] },
+        '1': { field: [] },
+      },
+      seed: 'sk07a-determinism-seed',
+    };
+
+    const run1 = createTestGame(setup);
+    run1.client.moves.drawCard();
+    run1.client.moves.resolveChoice(true);
+
+    const run2 = createTestGame(setup);
+    run2.client.moves.drawCard();
+    run2.client.moves.resolveChoice(true);
+
+    expect(run1.G().secret.decks['0']).toHaveLength(10);
+    expect(run1.G().secret.decks['0']).toEqual(run2.G().secret.decks['0']);
+  });
+
+  test('72. fires on the last-card draw and moves exactly 10 from the removed pile into the deck', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: [], deck: ['Sk-07'], banished: [...TEN_REMOVED] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.drawCard();
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('yesNo');
+    expect(pending?.sourceLabel).toBe('Sk-07');
+    expect(pending?.abilitySlot).toBe('a-confirm');
+
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.banished['0']).toEqual([]); // removed count: 10 -> 0
+    expect(G().public.deckCounts['0']).toBe(10); // deck count: 0 -> 10
+    expect([...G().secret.decks['0']].sort()).toEqual([...TEN_REMOVED].sort());
+  });
+
+  test('73. fewer than 10 face-up removed cards available: the exact-count pre-check fizzles before any prompt opens', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: [], deck: ['Sk-07'], banished: ['Sk-01', 'Sk-02', 'Sk-03', 'Sk-04', 'Sk-05'] }, // only 5
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.drawCard();
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.banished['0']).toHaveLength(5); // untouched
+    expect(G().secret.hands['0']).toEqual(['Sk-07']); // drew normally
+    expect(G().secret.decks['0']).toEqual([]);
+  });
+
+  test('74. declining the optional prompt leaves state untouched', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: [], deck: ['Sk-07'], banished: [...TEN_REMOVED] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.drawCard();
+    client.moves.resolveChoice(false);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.banished['0']).toEqual(TEN_REMOVED); // unchanged, same order
+    expect(G().secret.decks['0']).toEqual([]); // the draw itself still emptied the deck; declining doesn't undo that
+    expect(G().secret.hands['0']).toEqual(['Sk-07']);
+  });
+
+  test('75. the shuffled deck order never reaches the opposing client', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: [], deck: ['Sk-07'], banished: [...TEN_REMOVED] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.drawCard();
+    client.moves.resolveChoice(true);
+
+    expect(G().secret.decks['0']).toHaveLength(10); // visible to the owning player's own client, as normal
+
+    // Simulate what player 1's OWN client payload would be, via the real
+    // playerView reducer (the actual mechanism responsible for what reaches
+    // a client) — cast needed only because playerView's declared context
+    // type also carries ctx/game/data, none of which this game's
+    // implementation reads (it destructures just { G, playerID }).
+    const player1View = ShadowkhanGame.playerView!({ G: G(), playerID: '1' } as any) as ShadowkhanG;
+    expect(player1View.secret.decks['0']).toBeUndefined();
+    expect(player1View.secret.decks['1']).toEqual([]);
   });
 });

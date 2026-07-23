@@ -87,7 +87,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
   },
 
   turn: {
-    onBegin: ({ G, ctx }) => {
+    onBegin: ({ G, ctx, random }) => {
       G.public.attackedThisTurn = false;
 
       const pid = ctx.currentPlayer;
@@ -100,7 +100,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
           if (G.secret.decks[pid].length === 0) {
             G.public.loser = pid;
           } else {
-            drawCardForPlayer(G, ctx, pid);
+            drawCardForPlayer(G, { ctx, random }, pid);
           }
         }
       }
@@ -119,18 +119,18 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
   moves: {
     drawCard: {
       client: false,
-      move: ({ G, ctx }) => {
+      move: ({ G, ctx, random }) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         if (G.secret.hands[pid].length >= MAX_HAND_SIZE) return INVALID_MOVE;
         if (G.secret.decks[pid].length === 0) return INVALID_MOVE;
-        drawCardForPlayer(G, ctx, pid);
+        drawCardForPlayer(G, { ctx, random }, pid);
       },
     },
 
     playCard: {
       client: false,
-      move: ({ G, ctx }, handIndex: number, slot: number) => {
+      move: ({ G, ctx, random }, handIndex: number, slot: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const hand = G.secret.hands[pid];
@@ -151,16 +151,17 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
           turnsOnField: 0,
         };
         syncCounts(G);
-        fireTrigger(G, ctx, 'onSummon', { pid, slot });
+        fireTrigger(G, { ctx, random }, 'onSummon', { pid, slot });
       },
     },
 
     attackBattleCard: {
       client: false,
-      move: ({ G, ctx }, mySlot: number, theirSlot: number) => {
+      move: ({ G, ctx, random }, mySlot: number, theirSlot: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
+        const engineCtx = { ctx, random };
 
         if (G.public.attackedThisTurn) return INVALID_MOVE;
         if (G.public.turnsTaken[pid] < 1) return INVALID_MOVE;
@@ -179,7 +180,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         // blocks ability-driven ('ability'-cause) removal — enforced inside
         // removeFieldCard itself, not at this call site.
         if (attacker.currentBp > defender.currentBp) {
-          removeFieldCard(G, ctx, opp, theirSlot, 'battle', {
+          removeFieldCard(G, engineCtx, opp, theirSlot, 'battle', {
             fireOnRemoved: true,
             afterRemoved: (G2, ctx2) => fireTrigger(G2, ctx2, 'onBattleWin', { pid, slot: mySlot }),
           });
@@ -190,10 +191,10 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
             // attacker; the defender is only removed once its BP hits zero.
             modifyBp(defender, -attacker.currentBp);
             if (defender.currentBp <= 0) {
-              removeFieldCard(G, ctx, opp, theirSlot, 'battle', { fireOnRemoved: true });
+              removeFieldCard(G, engineCtx, opp, theirSlot, 'battle', { fireOnRemoved: true });
             }
           } else {
-            removeFieldCard(G, ctx, pid, mySlot, 'battle', { fireOnRemoved: true });
+            removeFieldCard(G, engineCtx, pid, mySlot, 'battle', { fireOnRemoved: true });
           }
         } else {
           // Shockwave: both lose top deck card face-down
@@ -206,7 +207,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
     attackHand: {
       client: false,
-      move: ({ G, ctx }, mySlot: number, theirHandIndex: number) => {
+      move: ({ G, ctx, random }, mySlot: number, theirHandIndex: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
@@ -227,7 +228,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         G.public.attackedThisTurn = true;
 
         const targetLabel = oppHand[theirHandIndex];
-        if (interceptHandOrDeckAttack(G, ctx, targetLabel, pid, mySlot)) {
+        if (interceptHandOrDeckAttack(G, { ctx, random }, targetLabel, pid, mySlot)) {
           return;
         }
 
@@ -265,7 +266,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
     attackDeck: {
       client: false,
-      move: ({ G, ctx }, mySlot: number) => {
+      move: ({ G, ctx, random }, mySlot: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
@@ -283,7 +284,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         G.public.attackedThisTurn = true;
 
         const targetLabel = G.secret.decks[opp][0];
-        if (interceptHandOrDeckAttack(G, ctx, targetLabel, pid, mySlot)) {
+        if (interceptHandOrDeckAttack(G, { ctx, random }, targetLabel, pid, mySlot)) {
           return;
         }
 
@@ -325,7 +326,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
     activateAbility: {
       client: false,
-      move: ({ G, ctx }, cardFieldIndex: number) => {
+      move: ({ G, ctx, random }, cardFieldIndex: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         if (cardFieldIndex < 0 || cardFieldIndex >= 3) return INVALID_MOVE;
@@ -336,17 +337,17 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         if (hasActiveEffect(G, pid, cardFieldIndex, 'cannotUseEffects')) return INVALID_MOVE;
 
         card.activated = true;
-        fireTrigger(G, ctx, 'onActivate', { pid, slot: cardFieldIndex });
+        fireTrigger(G, { ctx, random }, 'onActivate', { pid, slot: cardFieldIndex });
       },
     },
 
     resolveChoice: {
       client: false,
-      move: ({ G, ctx }, answer: number | boolean) => {
+      move: ({ G, ctx, random }, answer: number | boolean) => {
         const pending = G.public.pendingChoice;
         if (!pending) return INVALID_MOVE;
         if (pending.pid !== ctx.currentPlayer) return INVALID_MOVE;
-        if (!resolvePendingChoice(G, ctx, answer)) return INVALID_MOVE;
+        if (!resolvePendingChoice(G, { ctx, random }, answer)) return INVALID_MOVE;
       },
     },
 

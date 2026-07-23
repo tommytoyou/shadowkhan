@@ -1,6 +1,30 @@
 import { CARD_BY_LABEL } from './cards';
 import type { ActiveEffect, EffectKind, FieldCard, PendingChoice, PendingChoiceKind, ShadowkhanG } from './state';
 import { syncCounts } from './state';
+import type { FnContext } from 'boardgame.io';
+
+/** boardgame.io's deterministic random plugin — Shuffle/Die/etc. Derived
+ *  from FnContext rather than importing the plugin's own internal type
+ *  directly, since that's not part of the package's public export surface. */
+type RandomAPI = FnContext<ShadowkhanG>['random'];
+
+/**
+ * The single opaque "engine context" threaded through every ability code
+ * path in this file, replacing the old bare `ctx: unknown` parameter.
+ * `ctx` itself has never been read anywhere in this file (it's carried
+ * purely so a future need doesn't require re-plumbing every signature) —
+ * `random` rides along the exact same plumbing for the same reason, so any
+ * card effect, however deeply chained (fireTrigger -> run -> openChoice ->
+ * ... -> resolve -> dispatchSearch -> apply), has access to boardgame.io's
+ * deterministic random plugin without a parallel threading mechanism.
+ * Card effects must use `ctx.random`, never Math.random — the latter would
+ * desync replay and multiplayer clients, since only the plugin's calls are
+ * captured/replayed by boardgame.io's engine.
+ */
+export interface EngineCtx {
+  ctx: unknown;
+  random: RandomAPI;
+}
 
 export type Trigger =
   | 'onSummon'
@@ -17,7 +41,7 @@ export interface AbilitySelf {
 
 export interface EffectContext {
   G: ShadowkhanG;
-  ctx: unknown;
+  ctx: EngineCtx;
   self: AbilitySelf;
 }
 
@@ -55,7 +79,7 @@ export interface ChoiceAbility {
   leadsTo?: string;
   prompt: string;
   kind: PendingChoiceKind;
-  getOptions: (G: ShadowkhanG, ctx: unknown, self: AbilitySelf) => number[] | null;
+  getOptions: (G: ShadowkhanG, ctx: EngineCtx, self: AbilitySelf) => number[] | null;
   /** answer is number[] only for a multi-select choice's final resolution
    *  (see PendingChoice.multi) — every existing single-answer resolve()
    *  already rejects a non-number/non-boolean answer via its own
@@ -63,7 +87,7 @@ export interface ChoiceAbility {
    *  requires no changes to any existing resolve() body. */
   resolve: (
     G: ShadowkhanG,
-    ctx: unknown,
+    ctx: EngineCtx,
     self: AbilitySelf,
     answer: number | boolean | number[]
   ) => void;
@@ -85,7 +109,7 @@ export interface ChoiceAbility {
  *  the battle-combat call sites in game.ts pass fireOnRemoved. */
 export function removeOpponentFieldCard(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   oppPid: string,
   slot: number
 ): void {
@@ -232,6 +256,24 @@ export function removeFromOwnRemovedPile(
   if (index < 0 || index >= pile.length) return undefined;
   const [label] = pile.splice(index, 1);
   return label;
+}
+
+/** Removes multiple cards from owner's own face-up removed pile, by LABEL —
+ *  the multi-select counterpart to removeFromOwnRemovedPile, order-independent
+ *  the same way as discardMultipleFromOwnHand/removeMultipleFromOwnDeck
+ *  (each removed-pile entry is unique per player, so splicing by indexOf is
+ *  safe regardless of processing order). Used by Sk-07a's shuffle-into-deck. */
+export function removeMultipleFromOwnRemovedPile(
+  G: ShadowkhanG,
+  owner: string,
+  labels: string[]
+): void {
+  for (const label of labels) {
+    const pile = G.public.banished[owner];
+    const idx = pile.indexOf(label);
+    if (idx === -1) continue;
+    pile.splice(idx, 1);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,10 +450,15 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   // effect a ("If you draw this card and it is your last card, you may
   //   select 10 of your face-up removed cards, shuffle them, and add them to
   //   your deck.") — read "last card" as the last card OF YOUR DECK, i.e.
-  //   deck.length === 0 immediately after this draw. Needs a genuine
-  //   multi-select (pick exactly 10 from an arbitrarily-sized removed pool),
-  //   which the single-answer pendingChoice/dispatchSearch machinery can't
-  //   express — left deferred rather than faking it with repeated prompts.
+  //   deck.length === 0 immediately after this draw. Now wired: dispatchMultiSearch
+  //   expresses the exact-10 pick over zone: 'removed', and EngineCtx threads
+  //   boardgame.io's random plugin all the way from resolveChoice into the
+  //   apply closure below for the shuffle itself — see EngineCtx at the top
+  //   of this file. CHOICE_READY pre-check shape (same as Sk-05/10/11/20a/24
+  //   above): only opens the yesNo if the removed pile actually has 10 cards
+  //   to offer — dispatchMultiSearch's own exact-count zero-target gate would
+  //   catch this too, but checking up front avoids opening a yesNo whose
+  //   "yes" branch could never be paid.
   // effect b ("If you draw this card normally, you may place it at the
   //   bottom of your deck...") — the complementary branch: deck still has
   //   cards after this draw. Wired below. No search involved — the target is
@@ -420,6 +467,16 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   //   cannot play other action cards this turn" is not modeled — no
   //   per-turn lock state exists for action-card plays.
   'Sk-07': [
+    {
+      slot: 'a',
+      trigger: 'onDraw',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        if (G.secret.decks[self.pid].length !== 0) return; // branch b applies instead
+        if (G.public.banished[self.pid].length < 10) return;
+        openChoice(G, ctx, self, 'Sk-07', 'a-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-07']['a-confirm']);
+      },
+    },
     {
       slot: 'b',
       trigger: 'onDraw',
@@ -929,7 +986,7 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
 // before openChoice is ever called.
 function openChoice(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   self: AbilitySelf,
   label: string,
   key: string,
@@ -965,7 +1022,7 @@ function openChoice(
 // the yesNo itself must not open.
 function willHaveLegalOutcome(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   self: AbilitySelf,
   label: string,
   choice: ChoiceAbility
@@ -1015,7 +1072,7 @@ export interface RemovalOpts {
    *  went through (never on prevent/redirect) — e.g. attackBattleCard's
    *  onBattleWin for the attacker, which must not fire if the defender
    *  escaped instead of being removed. */
-  afterRemoved?: (G: ShadowkhanG, ctx: unknown) => void;
+  afterRemoved?: (G: ShadowkhanG, ctx: EngineCtx) => void;
 }
 
 export type FieldRemovalResult =
@@ -1035,7 +1092,7 @@ export interface RemovalHook {
    *  removal via finishFieldRemoval. */
   openPrompt: (
     G: ShadowkhanG,
-    ctx: unknown,
+    ctx: EngineCtx,
     pid: string,
     slot: number,
     opts: RemovalOpts | undefined
@@ -1250,7 +1307,7 @@ function finalizeFieldRemoval(G: ShadowkhanG, pid: string, slot: number): void {
  *  synchronous path and every hook's "declined" resolve() branch. */
 function finishFieldRemoval(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   pid: string,
   slot: number,
   opts: RemovalOpts | undefined
@@ -1287,7 +1344,7 @@ function finishFieldRemoval(
  */
 export function removeFieldCard(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   pid: string,
   slot: number,
   cause: RemovalCause,
@@ -1386,7 +1443,7 @@ function searchIndices(
  */
 function dispatchSearch(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   self: AbilitySelf,
   label: string,
   key: string,
@@ -1456,7 +1513,7 @@ function dispatchSearch(
  */
 function dispatchMultiSearch(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   self: AbilitySelf,
   label: string,
   key: string,
@@ -1733,9 +1790,39 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
     },
   },
 
-  // Sk-07 ACE IN THE HOLE confirm step. Only reachable via the dispatcher in
+  // Sk-07 ACE IN THE HOLE confirm steps. Only reachable via the dispatcher in
   // ABILITIES_BY_LABEL['Sk-07'] above.
   'Sk-07': {
+    'a-confirm': {
+      needsChoice: true,
+      prompt: 'Ace In The Hole: this drew your last deck card — select 10 of your face-up removed cards, shuffle them, and add them to your deck?',
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, ctx, self, answer) => {
+        if (answer !== true) return;
+        dispatchMultiSearch(
+          G,
+          ctx,
+          self,
+          'Sk-07',
+          'a-search',
+          'removed',
+          self.pid,
+          () => true, // any face-up removed card qualifies — no name/type/BP filter in the printed text
+          10,
+          true, // exact
+          'Choose exactly 10 of your face-up removed cards to shuffle into your deck.',
+          (G2, owner, labels) => {
+            removeMultipleFromOwnRemovedPile(G2, owner, labels);
+            // ctx (EngineCtx) is captured from the enclosing resolve() — the
+            // ONLY source of randomness any card effect may use, never
+            // Math.random (see EngineCtx's doc comment at the top of this file).
+            const shuffled = ctx.random.Shuffle(labels);
+            G2.secret.decks[owner].push(...shuffled);
+          }
+        );
+      },
+    },
     'b-confirm': {
       needsChoice: true,
       prompt: 'Ace In The Hole: place it at the bottom of your deck?',
@@ -2028,7 +2115,7 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
 
 export function fireTrigger(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   trigger: Trigger,
   self: AbilitySelf
 ): void {
@@ -2088,7 +2175,7 @@ export function fireTrigger(
 // onDraw for its own, different card, and never replays the outer draw.
 function fireOnDraw(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   pid: string,
   handIndex: number
 ): void {
@@ -2127,7 +2214,7 @@ function fireOnDraw(
  *  above for what does and doesn't route through here. */
 export function drawCardForPlayer(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   pid: string
 ): void {
   const deck = G.secret.decks[pid];
@@ -2158,7 +2245,7 @@ export function drawCardForPlayer(
  */
 function resolveMultiChoice(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   pending: PendingChoice,
   choice: ChoiceAbility,
   answer: number | boolean
@@ -2201,7 +2288,7 @@ function resolveMultiChoice(
  *  legal option, so the move layer can turn that into INVALID_MOVE. */
 export function resolvePendingChoice(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   answer: number | boolean
 ): boolean {
   const pending = G.public.pendingChoice;
@@ -2242,7 +2329,7 @@ export function resolvePendingChoice(
 
 export function interceptHandOrDeckAttack(
   G: ShadowkhanG,
-  ctx: unknown,
+  ctx: EngineCtx,
   targetLabel: string,
   attackerPid: string,
   attackerSlot: number
@@ -2274,7 +2361,6 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search half (a named search for a removed face-up card, over the now-searchable 'removed' zone) is expressible with dispatchSearch. Still blocked: the found card must go to a PLAYER-CHOSEN empty field slot, not to hand — dispatchSearch's apply step has no destination-slot target step, and 'removed FROM YOUR FIELD specifically' (vs. removed from hand/deck) isn't tracked anywhere in G.public.banished, which stores only a label with no origin-zone metadata." },
   { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
   { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "dispatchMultiSearch (added this pass) can now express the multi-select removal itself, but 'cards equal to the selected card's BP' still needs a variable, dynamically-computed count derived from Sk-06a's own selection (which is itself blocked — see Sk-06a), and 'the selected card is considered played' at the start of your next turn still needs a delayed-trigger scheduler that doesn't exist. Multi-select alone doesn't unlock this." },
-  { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The removed-pile gap that used to block this is solved (dispatchMultiSearch now supports zone: 'removed' as of this pass) — a 'select 10 of your face-up removed cards' exact-count multi-select is expressible today. Still blocked: 'shuffle them' needs boardgame.io's deterministic random plugin, and resolveChoice's move signature (in game.ts) does not destructure `random` from its context, so ability-resolve code currently has no access to a random source at all. Using Math.random() instead would break boardgame.io's deterministic-replay/sync guarantees and is not an acceptable workaround." },
   { label: 'Sk-08', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The play-gate (own field has Blazing Sky Goblin/Sand Squid/Battle Shock Scorpion) is now enforced via PLAY_GATES/isPlayLegal. Still unwired: 'From your deck, you may play one of the above-mentioned cards that is not already on your field' — the named-card search over the deck is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, and 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top." },
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: "Only usable on Shadow Ghost — this is a targeting/attach requirement (which field card the Power Card enhances), not a boolean state condition, so it doesn't fit PLAY_GATES's check(G, pid) => boolean shape. playCard has no attach-target parameter for Power Cards to express 'only usable on card X' at all. Excluded from this pass rather than approximated as 'Shadow Ghost merely present somewhere on the field', which would misrepresent the attachment relationship." },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "A continuous removal-immunity effect with a stated duration — the persistent-effect registry (hasActiveEffect/expiresAtGlobalTurn) added for Sk-12/Sk-22 could express it directly. Still blocked on the same unrelated gap as Sk-09a though: depends on Sk-09's attach targeting (which specific field card this protects), which isn't wired." },
@@ -2282,8 +2368,8 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },
   { label: 'Sk-18', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The 'select 1 of your removed cards' pick is now searchable (zone: 'removed'), but the effect isn't a search-and-move — it's a copy-identity mechanic ('this card's BP and effects become identical to the selected card'), which has no representation in FieldCard at all (no notion of a card impersonating another card's label/BP/ability set). The zone gap being solved doesn't touch this." },
   { label: 'Sk-18', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-18a's copy-identity selection, which is still blocked — see Sk-18a." },
-  { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select...call it correctly' — optional guessing minigame." },
-  { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome." },
+  { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'shuffle them face-down, flip the top card face-up, and if you call it correctly...' — the randomness half (EngineCtx/random.Shuffle, wired for Sk-07a this pass) is no longer the blocker. What's still missing is the guessing interaction itself: a way for the player to submit a guess BEFORE the flip, and a PendingChoiceKind/resolve shape that reveals the flipped card and compares it to that guess — none of which exists. Deliberately not attempted this pass (out of scope: needs a guessing interaction beyond randomness, not just a shuffle)." },
+  { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome, which is itself still blocked — see Sk-21a." },
   { label: 'Sk-26', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can select one Battle Card...place it under this card' — optional target selection; also needs a new 'cards attached under this card' mechanic." },
   { label: 'Sk-26', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Depends entirely on Sk-26a's 'place under this card' mechanic, which is deferred — nothing will ever be attached to return." },
   { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },

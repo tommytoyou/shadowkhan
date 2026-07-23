@@ -56,6 +56,13 @@ export interface BoardPositionSpec {
   rulesOfEngagementActive?: boolean;
   /** G.public.activeEffects. Defaults to []. */
   activeEffects?: ActiveEffect[];
+  /** boardgame.io's Game.seed — fixes the master's deterministic PRNG so a
+   *  test invoking random.Shuffle/Die (via EngineCtx, see effects.ts) can
+   *  assert reproducibility: two createTestGame calls with the same seed and
+   *  the same move sequence must produce the same random outcome. Omitted by
+   *  default (boardgame.io picks its own seed), matching every existing test
+   *  that doesn't care about randomness at all. */
+  seed?: string | number;
 }
 
 function toFieldCard(spec: FieldSlotSpec): FieldCard | null {
@@ -137,6 +144,7 @@ export function createTestGame(spec: BoardPositionSpec): TestGame {
   const testGame = {
     ...ShadowkhanGame,
     setup: () => initialG,
+    ...(spec.seed !== undefined ? { seed: spec.seed } : {}),
   };
 
   const client = Client<ShadowkhanG>({
