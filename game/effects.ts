@@ -217,6 +217,23 @@ export function moveDeckCardToHand(
   G.secret.hands[owner].push(label);
 }
 
+/** Removes the label at `index` from owner's own face-up removed pile
+ *  (G.public.banished) and returns it, so the caller can place it wherever
+ *  the specific card's text says (hand, field, deck) — there's no single
+ *  "found it, take it" destination the way moveDeckCardToHand has one,
+ *  since different removed-pile abilities send the card different places.
+ *  Public state — no ordinal secrecy concern here (see zoneIsSecret). */
+export function removeFromOwnRemovedPile(
+  G: ShadowkhanG,
+  owner: string,
+  index: number
+): string | undefined {
+  const pile = G.public.banished[owner];
+  if (index < 0 || index >= pile.length) return undefined;
+  const [label] = pile.splice(index, 1);
+  return label;
+}
+
 // ---------------------------------------------------------------------------
 // Play-legality gates. Some cards print "you can only play this card if...":
 // a condition on game state that must hold BEFORE the card is even allowed
@@ -332,6 +349,33 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
       auto: true,
       run: ({ G }) => {
         G.public.rulesOfEngagementActive = true;
+      },
+    },
+  ],
+
+  // Sk-03 ARRIVAL OF DOOM, effect b: "Remove one card on your field and add
+  // one War Dragon (that was removed or in your deck) to your hand."
+  // Mandatory (no "may"), two independent steps chained via resolve():
+  //  1. an 'ownField' target pick for which own card to remove — always at
+  //     least one legal target, since PLAY_GATES['Sk-03'] already requires
+  //     Sage of Dark Omen on the field to play this card at all;
+  //  2. a named search for WAR DRAGON, tried against the now-public 'removed'
+  //     zone first and falling back to 'deck' only if the removed pile has no
+  //     match. Singleton-deck property makes this safe: WAR DRAGON can only
+  //     ever be in exactly one zone at a time, so "removed, else deck" is an
+  //     unambiguous per-card composition, not a new parallel search
+  //     primitive — it's two ordinary dispatchSearch calls, at most one of
+  //     which ever actually finds anything. If it's in neither (already on a
+  //     field, in a hand, or simply doesn't exist for this player), step 2
+  //     silently fizzles — the removal in step 1 still stands, same
+  //     independent-clause treatment used elsewhere in this file.
+  'Sk-03': [
+    {
+      slot: 'b',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        openChoice(G, ctx, self, 'Sk-03', 'b-remove', CHOICE_ABILITIES_BY_LABEL['Sk-03']['b-remove']);
       },
     },
   ],
@@ -787,10 +831,18 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
-  // Sk-25 BATTLE SHOCK SCORPION: "If this card removes a Battle Card, you can
-  // remove the top card from your opponent's deck." "You can" = optional —
-  // dispatch a yesNo confirm, but only if the opponent's deck actually has a
-  // top card to take; otherwise no prompt opens.
+  // Sk-25 BATTLE SHOCK SCORPION.
+  // effect a: "If this card removes a Battle Card, you can remove the top
+  //   card from your opponent's deck." "You can" = optional — dispatch a
+  //   yesNo confirm, but only if the opponent's deck actually has a top card
+  //   to take; otherwise no prompt opens.
+  // effect c: "If you play this card while Blazing Sky Goblin and Sand Squid
+  //   are on your field, you can add one face-up removed Action Card to your
+  //   hand." Same CHOICE_READY pre-check shape as effect a and Sk-24a: check
+  //   the board condition AND that the removed pile actually holds a
+  //   matching card before opening the yesNo. Separate onSummon trigger,
+  //   doesn't interact with effect a's onBattleWin or effect b's
+  //   REMOVAL_HOOKS entry at all.
   'Sk-25': [
     {
       slot: 'a',
@@ -800,6 +852,25 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
         const opp = self.pid === '0' ? '1' : '0';
         if (G.secret.decks[opp].length === 0) return;
         openChoice(G, ctx, self, 'Sk-25', 'a-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-25']['a-confirm']);
+      },
+    },
+    {
+      slot: 'c',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const field = G.public.field[self.pid];
+        const hasAllies = field.some((c) => c && CARD_BY_LABEL[c.label]?.name === 'BLAZING SKY GOBLIN')
+          && field.some((c) => c && CARD_BY_LABEL[c.label]?.name === 'SAND SQUID');
+        if (!hasAllies) return;
+        const matches = searchIndices(
+          G,
+          'removed',
+          self.pid,
+          (l) => CARD_BY_LABEL[l]?.type === 'action'
+        );
+        if (matches.length === 0) return;
+        openChoice(G, ctx, self, 'Sk-25', 'c-confirm', CHOICE_ABILITIES_BY_LABEL['Sk-25']['c-confirm']);
       },
     },
   ],
@@ -1241,23 +1312,48 @@ export function removeFieldCard(
 
 // ---------------------------------------------------------------------------
 // Named/attribute card search primitive. A single reusable engine for every
-// ability whose effect text is "find a card by name/type/BP/tier in a hand
-// or deck" — one generic mechanism, no per-card search logic.
+// ability whose effect text is "find a card by name/type/BP/tier in a hand,
+// deck, or your face-up removed pile" — one generic mechanism, no per-card
+// search logic.
+//
+// 'removed' reads G.public.banished[owner] — the face-up removed pile,
+// which is PUBLIC (see PublicState in state.ts), unlike deck/hand which are
+// secret. Face-down removals never enter this array at all: they only ever
+// increment G.public.banishedFaceDown[owner], a bare counter with no label
+// stored anywhere — see removeOwnDeckTopFaceDown / banishHandCardFaceDown.
+// So "face-up only" isn't a distinction this search primitive has to add;
+// it's already structural — a face-down removal has no identity left to
+// search for or select, in any zone, by construction.
 // ---------------------------------------------------------------------------
 
-export type SearchZone = 'deck' | 'hand';
+export type SearchZone = 'deck' | 'hand' | 'removed';
 
-/** Scans `owner`'s deck or hand and returns the zone-relative indices of
- *  entries matching `predicate`, in zone order. This is the only place that
- *  reads a deck or hand array for search purposes — every search ability
- *  composes it instead of poking G.secret directly. */
+/** The single place that maps a zone to its underlying array. Replaces the
+ *  `zone === 'deck' ? ... : ...` ternary that only had room for two zones. */
+function readZoneSource(G: ShadowkhanG, zone: SearchZone, owner: string): readonly string[] {
+  if (zone === 'deck') return G.secret.decks[owner];
+  if (zone === 'hand') return G.secret.hands[owner];
+  return G.public.banished[owner];
+}
+
+/** True for a zone whose real index must never reach G.public as-is (deck,
+ *  hand — both secret). False for 'removed', which is already fully public
+ *  — see dispatchSearch/dispatchMultiSearch for what this changes. */
+function zoneIsSecret(zone: SearchZone): boolean {
+  return zone !== 'removed';
+}
+
+/** Scans `owner`'s zone and returns the zone-relative indices of entries
+ *  matching `predicate`, in zone order. This is the only place that reads a
+ *  deck, hand, or removed-pile array for search purposes — every search
+ *  ability composes it instead of poking G.secret/G.public.banished directly. */
 function searchIndices(
   G: ShadowkhanG,
   zone: SearchZone,
   owner: string,
   predicate: (label: string) => boolean
 ): number[] {
-  const source = zone === 'deck' ? G.secret.decks[owner] : G.secret.hands[owner];
+  const source = readZoneSource(G, zone, owner);
   return source
     .map((label, i) => (predicate(label) ? i : null))
     .filter((i): i is number => i !== null);
@@ -1271,17 +1367,22 @@ function searchIndices(
  *  - exactly one match: applies immediately via `apply`, no prompt.
  *  - more than one match: opens a real choice among the matches.
  *
- * CRITICAL: deck order is secret state (G.secret) and must never reach
- * G.public — but every pendingChoice is broadcast to both players via
- * G.public.pendingChoice. So when `zone` is 'deck', the opened choice's
- * `options` are ORDINAL positions within the match list (0, 1, 2, ... —
- * "the 1st/2nd/3rd match"), never real deck indices. `resolve` re-derives
- * the real index by re-running the identical search against the secret deck
- * at answer time — safe, because no other move can run while a
- * pendingChoice is open, so the deck can't have changed underneath it. Hand
- * search reuses the same ordinal scheme for uniformity, even though a hand
- * search would be safe to reveal real indices for (it's already visible to
- * its own owner via playerView) — one code path, not two.
+ * CRITICAL: deck (and hand) order is secret state (G.secret) and must never
+ * reach G.public — but every pendingChoice is broadcast to both players via
+ * G.public.pendingChoice. So for those zones, the opened choice's `options`
+ * are ORDINAL positions within the match list (0, 1, 2, ... — "the
+ * 1st/2nd/3rd match"), never real indices. `resolve` re-derives the real
+ * index by re-running the identical search at answer time — safe, because
+ * no other move can run while a pendingChoice is open. Hand search reuses
+ * this scheme for uniformity even though it's not strictly required for
+ * hand (visible to its own owner via playerView already).
+ *
+ * 'removed' is different on purpose: G.public.banished is ALREADY fully
+ * public to both players (see zoneIsSecret) — wrapping it in the same
+ * ordinal indirection would hide nothing real and just be pointless
+ * misdirection, so for 'removed' the choice's `options` ARE the real
+ * indices directly, and `resolve` still re-validates against a fresh
+ * search (for consistency/robustness) but skips the ordinal translation.
  */
 function dispatchSearch(
   G: ShadowkhanG,
@@ -1301,16 +1402,20 @@ function dispatchSearch(
     apply(G, owner, matches[0]);
     return;
   }
+  const secret = zoneIsSecret(zone);
   const searchChoice: ChoiceAbility = {
     needsChoice: true,
     prompt,
     kind: 'chooseAbility',
-    getOptions: (G2) => searchIndices(G2, zone, owner, predicate).map((_, i) => i),
+    getOptions: (G2) => {
+      const real = searchIndices(G2, zone, owner, predicate);
+      return secret ? real.map((_, i) => i) : real;
+    },
     resolve: (G2, _ctx2, _self2, answer) => {
       if (typeof answer !== 'number') return;
       const fresh = searchIndices(G2, zone, owner, predicate);
-      const realIndex = fresh[answer];
-      if (realIndex === undefined) return;
+      const realIndex = secret ? fresh[answer] : answer;
+      if (realIndex === undefined || !fresh.includes(realIndex)) return;
       apply(G2, owner, realIndex);
     },
   };
@@ -1338,14 +1443,16 @@ function dispatchSearch(
  *  - otherwise (exact with more candidates than count, or "up to" with any
  *    candidates present): opens a real multi-select choice.
  *
- * CRITICAL (same as dispatchSearch): for a deck zone, `options` are ORDINAL
- * positions within the match list, never real deck indices. `resolve`
- * receives the final picked ORDINALS (as number[], from resolveMultiChoice)
- * and re-derives real matches with a fresh search, then translates to
- * LABELS (not raw indices) before calling `apply` — labels are unique per
- * player's deck/hand, so removing several by label is safe regardless of
- * processing order, unlike raw indices which shift as earlier ones are
- * spliced out.
+ * CRITICAL (same as dispatchSearch): for deck/hand, `options` are ORDINAL
+ * positions within the match list, never real indices. `resolve` receives
+ * the final picked ORDINALS (as number[], from resolveMultiChoice) and
+ * re-derives real matches with a fresh search, then translates to LABELS
+ * (not raw indices) before calling `apply` — labels are unique per player's
+ * deck/hand/removed pile, so removing several by label is safe regardless
+ * of processing order, unlike raw indices which shift as earlier ones are
+ * spliced out. For 'removed' (already fully public — see dispatchSearch),
+ * the same ordinal step is skipped: options and picks are real indices
+ * throughout, with no indirection to hide anything that isn't secret.
  */
 function dispatchMultiSearch(
   G: ShadowkhanG,
@@ -1365,24 +1472,28 @@ function dispatchMultiSearch(
   if (matches.length === 0) return;
   if (exact && matches.length < count) return;
   if (exact && matches.length === count) {
-    const source = zone === 'deck' ? G.secret.decks[owner] : G.secret.hands[owner];
+    const source = readZoneSource(G, zone, owner);
     apply(G, owner, matches.map((i) => source[i]));
     return;
   }
 
+  const secret = zoneIsSecret(zone);
   const multiChoice: ChoiceAbility = {
     needsChoice: true,
     prompt,
     kind: 'chooseAbility',
-    getOptions: (G2) => searchIndices(G2, zone, owner, predicate).map((_, i) => i),
+    getOptions: (G2) => {
+      const real = searchIndices(G2, zone, owner, predicate);
+      return secret ? real.map((_, i) => i) : real;
+    },
     resolve: (G2, _ctx2, _self2, answer) => {
       if (!Array.isArray(answer)) return;
       const fresh = searchIndices(G2, zone, owner, predicate);
-      const source = zone === 'deck' ? G2.secret.decks[owner] : G2.secret.hands[owner];
-      const labels = answer
-        .map((ordinal) => fresh[ordinal])
-        .filter((i): i is number => i !== undefined)
-        .map((realIndex) => source[realIndex]);
+      const source = readZoneSource(G2, zone, owner);
+      const realIndices = secret
+        ? answer.map((ordinal) => fresh[ordinal]).filter((i): i is number => i !== undefined)
+        : answer.filter((i) => fresh.includes(i));
+      const labels = realIndices.map((realIndex) => source[realIndex]);
       apply(G2, owner, labels);
     },
   };
@@ -1401,6 +1512,47 @@ function eligibleOwnBattleCardsAtOrBelow(
 }
 
 const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> = {
+  // Sk-03 ARRIVAL OF DOOM confirm steps. Only reachable via the dispatcher in
+  // ABILITIES_BY_LABEL['Sk-03'] above.
+  'Sk-03': {
+    'b-remove': {
+      needsChoice: true,
+      prompt: 'Arrival of Doom: choose one card on your field to remove.',
+      kind: 'ownField',
+      getOptions: (G, _ctx, self) =>
+        G.public.field[self.pid]
+          .map((c, i) => (c ? i : null))
+          .filter((i): i is number => i !== null),
+      resolve: (G, ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        removeFieldCard(G, ctx, self.pid, answer, 'ability');
+
+        const isWarDragon = (l: string) => CARD_BY_LABEL[l]?.name === 'WAR DRAGON';
+        const inRemoved = searchIndices(G, 'removed', self.pid, isWarDragon);
+        const zone: SearchZone = inRemoved.length > 0 ? 'removed' : 'deck';
+        dispatchSearch(
+          G,
+          ctx,
+          self,
+          'Sk-03',
+          'b-warDragon',
+          zone,
+          self.pid,
+          isWarDragon,
+          'Arrival of Doom: add your War Dragon to your hand.',
+          (G2, owner, realIndex) => {
+            if (zone === 'removed') {
+              const found = removeFromOwnRemovedPile(G2, owner, realIndex);
+              if (found) G2.secret.hands[owner].push(found);
+            } else {
+              moveDeckCardToHand(G2, owner, realIndex);
+            }
+          }
+        );
+      },
+    },
+  },
+
   // Sk-14 ONE EYED MECHANICAL MONSTER, ability a: "When this card is
   // summoned, you may remove 1 of your opponent's Battle Cards from the
   // field." A yesNo entry, chaining into an opponentField target pick.
@@ -1731,6 +1883,30 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
         if (answer !== true) return;
         const opp = self.pid === '0' ? '1' : '0';
         removeOpponentDeckTop(G, opp);
+      },
+    },
+    'c-confirm': {
+      needsChoice: true,
+      prompt: 'Battle Shock Scorpion: add one face-up removed Action Card to your hand?',
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, ctx, self, answer) => {
+        if (answer !== true) return;
+        dispatchSearch(
+          G,
+          ctx,
+          self,
+          'Sk-25',
+          'c-search',
+          'removed',
+          self.pid,
+          (l) => CARD_BY_LABEL[l]?.type === 'action',
+          'Choose which face-up removed Action Card to add to your hand.',
+          (G2, owner, realIndex) => {
+            const found = removeFromOwnRemovedPile(G2, owner, realIndex);
+            if (found) G2.secret.hands[owner].push(found);
+          }
+        );
       },
     },
   },
@@ -2095,21 +2271,19 @@ export interface DeferredAbility {
 
 export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
-  { label: 'Sk-03', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Two independent selections, not one search: an own-field removal target (no search involved), plus a named search for War Dragon across TWO zones (face-up removed pile, which is public, OR the deck, which is secret) — dispatchSearch only takes a single zone, and folding the public removed-pile half in would silently misrepresent the other half as covered. Deferred as a whole rather than wiring the deck-only half and dropping the removed-pile branch." },
-  { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: 'Select which removed face-up card to return, and which field slot to return it to.' },
+  { label: 'Sk-04', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search half (a named search for a removed face-up card, over the now-searchable 'removed' zone) is expressible with dispatchSearch. Still blocked: the found card must go to a PLAYER-CHOSEN empty field slot, not to hand — dispatchSearch's apply step has no destination-slot target step, and 'removed FROM YOUR FIELD specifically' (vs. removed from hand/deck) isn't tracked anywhere in G.public.banished, which stores only a label with no origin-zone metadata." },
   { label: 'Sk-06', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The search itself (BP<=8 Battle Card from your deck) is expressible with dispatchSearch, but the printed effect doesn't add the found card to hand — it's held for effect b's cost payment and a delayed 'considered played next turn' summon, neither of which exist. Wiring just the search with dispatchSearch's only real action (move-to-hand) would misrepresent the card." },
   { label: 'Sk-06', slot: 'b', classification: 'NEEDS_CHOICE', reason: "dispatchMultiSearch (added this pass) can now express the multi-select removal itself, but 'cards equal to the selected card's BP' still needs a variable, dynamically-computed count derived from Sk-06a's own selection (which is itself blocked — see Sk-06a), and 'the selected card is considered played' at the start of your next turn still needs a delayed-trigger scheduler that doesn't exist. Multi-select alone doesn't unlock this." },
-  { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "dispatchMultiSearch (added this pass) can now express 'select 10' as an exact-count multi-select — but the zone is your face-up REMOVED PILE, not deck or hand, and dispatchMultiSearch (like dispatchSearch before it) only supports those two zones. Same removed-pile gap already blocking Sk-04a/Sk-18a/Sk-25c. Multi-select alone doesn't unlock this." },
+  { label: 'Sk-07', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The removed-pile gap that used to block this is solved (dispatchMultiSearch now supports zone: 'removed' as of this pass) — a 'select 10 of your face-up removed cards' exact-count multi-select is expressible today. Still blocked: 'shuffle them' needs boardgame.io's deterministic random plugin, and resolveChoice's move signature (in game.ts) does not destructure `random` from its context, so ability-resolve code currently has no access to a random source at all. Using Math.random() instead would break boardgame.io's deterministic-replay/sync guarantees and is not an acceptable workaround." },
   { label: 'Sk-08', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The play-gate (own field has Blazing Sky Goblin/Sand Squid/Battle Shock Scorpion) is now enforced via PLAY_GATES/isPlayLegal. Still unwired: 'From your deck, you may play one of the above-mentioned cards that is not already on your field' — the named-card search over the deck is expressible with dispatchSearch, but the found card must be PLAYED directly to an empty own field slot (and fire onSummon), not added to hand — dispatchSearch's apply step only performs the caller-supplied action, and 'play to field' needs its own empty-slot target selection chained after the search, with its own zero-target case (no room to play it) layered on top." },
   { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: "Only usable on Shadow Ghost — this is a targeting/attach requirement (which field card the Power Card enhances), not a boolean state condition, so it doesn't fit PLAY_GATES's check(G, pid) => boolean shape. playCard has no attach-target parameter for Power Cards to express 'only usable on card X' at all. Excluded from this pass rather than approximated as 'Shadow Ghost merely present somewhere on the field', which would misrepresent the attachment relationship." },
   { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "A continuous removal-immunity effect with a stated duration — the persistent-effect registry (hasActiveEffect/expiresAtGlobalTurn) added for Sk-12/Sk-22 could express it directly. Still blocked on the same unrelated gap as Sk-09a though: depends on Sk-09's attach targeting (which specific field card this protects), which isn't wired." },
   { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },
   { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },
-  { label: 'Sk-18', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select 1 of your removed cards' to copy." },
-  { label: 'Sk-18', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-18a's selection." },
+  { label: 'Sk-18', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The 'select 1 of your removed cards' pick is now searchable (zone: 'removed'), but the effect isn't a search-and-move — it's a copy-identity mechanic ('this card's BP and effects become identical to the selected card'), which has no representation in FieldCard at all (no notion of a card impersonating another card's label/BP/ability set). The zone gap being solved doesn't touch this." },
+  { label: 'Sk-18', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-18a's copy-identity selection, which is still blocked — see Sk-18a." },
   { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you may select...call it correctly' — optional guessing minigame." },
   { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome." },
-  { label: 'Sk-25', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you can add one face-up removed Action Card...' — optional, selects from the removed pool." },
   { label: 'Sk-26', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can select one Battle Card...place it under this card' — optional target selection; also needs a new 'cards attached under this card' mechanic." },
   { label: 'Sk-26', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Depends entirely on Sk-26a's 'place under this card' mechanic, which is deferred — nothing will ever be attached to return." },
   { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },

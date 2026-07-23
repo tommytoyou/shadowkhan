@@ -1564,3 +1564,164 @@ describe('Sk-20a SAGE OF DARK OMEN (multi-select)', () => {
     expect(G().public.pendingChoice).toBeNull();
   });
 });
+
+describe('Sk-03b ARRIVAL OF DOOM (own-field removal + War Dragon retrieval)', () => {
+  test("64. multi-option own-field removal, then War Dragon found face-up in the removed pile is added to hand", () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20', 'Sk-29'], hand: ['Sk-03'], banished: ['Sk-16'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 2);
+
+    const removePending = G().public.pendingChoice;
+    expect(removePending).not.toBeNull();
+    expect(removePending?.kind).toBe('ownField');
+    // Sk-03 itself is already field-resident by the time onSummon fires
+    // (playCard places the card before firing the trigger — see game.ts), so
+    // it's a legal removal target too, alongside the two pre-existing cards.
+    expect(removePending?.options).toEqual([0, 1, 2]);
+
+    client.moves.resolveChoice(1); // remove Sk-29, leave Sage of Dark Omen (and Sk-03 itself) in place
+
+    // War Dragon had exactly one match in the (public) removed pile, so
+    // dispatchSearch's single-match fast path applies it immediately — no
+    // second prompt.
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][1]).toBeNull();
+    expect(G().public.banished['0']).not.toContain('Sk-16');
+    expect(G().secret.hands['0']).toEqual(['Sk-16']);
+  });
+
+  test('65. War Dragon absent from the removed pile falls back to the deck', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20'], hand: ['Sk-03'], deck: ['Sk-16'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+
+    const removePending = G().public.pendingChoice;
+    expect(removePending?.kind).toBe('ownField');
+    // Sage of Dark Omen (slot 0) and Sk-03 itself (slot 1, already field-resident by onSummon time) are both legal targets.
+    expect(removePending?.options).toEqual([0, 1]);
+
+    client.moves.resolveChoice(0); // remove Sage of Dark Omen
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().secret.decks['0']).toEqual([]);
+    expect(G().secret.hands['0']).toEqual(['Sk-16']);
+  });
+
+  test('66. War Dragon nowhere to be found: the field removal still happens, and the retrieval half fizzles silently', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-20'], hand: ['Sk-03'], deck: ['Sk-02'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1);
+    client.moves.resolveChoice(0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull(); // mandatory removal clause still applied
+    expect(G().public.banished['0']).toContain('Sk-20');
+    expect(G().secret.decks['0']).toEqual(['Sk-02']); // untouched — no War Dragon to find
+    expect(G().secret.hands['0']).toEqual([]);
+  });
+});
+
+describe('Sk-25c BATTLE SHOCK SCORPION (removed-pile retrieval)', () => {
+  test('67. Blazing Sky Goblin and Sand Squid on field, one face-up removed Action Card: confirms and adds it to hand', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-24', 'Sk-21'], hand: ['Sk-25'], banished: ['Sk-02'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 2);
+
+    const confirm = G().public.pendingChoice;
+    expect(confirm).not.toBeNull();
+    expect(confirm?.kind).toBe('yesNo');
+    expect(confirm?.sourceLabel).toBe('Sk-25');
+    expect(confirm?.abilitySlot).toBe('c-confirm');
+
+    client.moves.resolveChoice(true);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.banished['0']).toEqual([]);
+    expect(G().secret.hands['0']).toEqual(['Sk-02']);
+  });
+
+  test('68. multiple face-up removed Action Cards: the choice exposes REAL removed-pile indices, not ordinal positions (removed pile is public)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        // index 0 is a non-Action filler; the two Action Card matches sit at
+        // real indices 1 and 2 — if this zone used the ordinal-secrecy
+        // scheme (like deck/hand), the options would instead read [0, 1].
+        '0': { field: ['Sk-24', 'Sk-21'], hand: ['Sk-25'], banished: ['Sk-29', 'Sk-02', 'Sk-06'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 2);
+    client.moves.resolveChoice(true);
+
+    const searchPending = G().public.pendingChoice;
+    expect(searchPending).not.toBeNull();
+    expect(searchPending?.kind).toBe('chooseAbility');
+    expect(searchPending?.options).toEqual([1, 2]);
+
+    client.moves.resolveChoice(2);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.banished['0']).toEqual(['Sk-29', 'Sk-02']);
+    expect(G().secret.hands['0']).toEqual(['Sk-06']);
+  });
+
+  test('69. no face-up removed Action Card: the CHOICE_READY pre-check fizzles before any prompt opens', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-24', 'Sk-21'], hand: ['Sk-25'], banished: ['Sk-29'] }, // Rarewolf — not an Action Card
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 2);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][2]?.label).toBe('Sk-25');
+    expect(G().public.banished['0']).toEqual(['Sk-29']);
+  });
+
+  test('70. a face-down removed card is never selectable: the search reads only the face-up pile, regardless of the face-down count', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': {
+          field: ['Sk-24', 'Sk-21'],
+          hand: ['Sk-25'],
+          banished: ['Sk-02'], // one genuine face-up Action Card match
+          banishedFaceDown: 3, // simulates several other cards removed face-down — no labels stored for any of them
+        },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 2);
+    client.moves.resolveChoice(true);
+
+    // Only the single face-up match was ever a candidate — the face-down
+    // count neither inflates the option list nor contributes a card to hand.
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().secret.hands['0']).toEqual(['Sk-02']);
+    expect(G().public.banishedFaceDown['0']).toBe(3); // untouched by the search
+  });
+});

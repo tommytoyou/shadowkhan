@@ -35,6 +35,11 @@ export interface PlayerPositionSpec {
   /** G.public.banished (face-up removed pile) for this player, by label.
    *  Defaults to []. */
   banished?: string[];
+  /** G.public.banishedFaceDown (face-down removed count — no labels, by
+   *  construction) for this player. Defaults to 0. Seedable so a test can
+   *  assert that face-down removals never leak into a face-up-only search
+   *  (see the 'removed' zone in effects.ts) regardless of how many there are. */
+  banishedFaceDown?: number;
 }
 
 export interface BoardPositionSpec {
@@ -101,7 +106,7 @@ function buildG(spec: BoardPositionSpec): ShadowkhanG {
       handCounts: { '0': hand0.length, '1': hand1.length },
       field: { '0': buildField(p0.field), '1': buildField(p1.field) },
       banished: { '0': [...(p0.banished ?? [])], '1': [...(p1.banished ?? [])] },
-      banishedFaceDown: { '0': 0, '1': 0 },
+      banishedFaceDown: { '0': p0.banishedFaceDown ?? 0, '1': p1.banishedFaceDown ?? 0 },
       turnsTaken: { '0': p0.turnsTaken ?? 0, '1': p1.turnsTaken ?? 0 },
       bottomUpUsed: { '0': false, '1': false },
       attackedThisTurn: spec.attackedThisTurn ?? false,
