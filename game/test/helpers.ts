@@ -16,10 +16,13 @@ import type { ActiveEffect, FieldCard, PendingChoice, ScheduledSummon, Shadowkha
 export type PlayerID = '0' | '1';
 
 /** A field slot: a bare label (defaults to that card's printed BP), an object
- *  for finer control (custom currentBp / flags), or null for an empty slot. */
+ *  for finer control (custom currentBp / flags / attached), or null for an
+ *  empty slot. `attached` seeds FieldCard.attached directly (labels of cards
+ *  held under this one — Sk-09's own attachment, or Sk-26's stolen cards)
+ *  without needing to re-derive the whole attach/steal chain in every test. */
 export type FieldSlotSpec =
   | string
-  | (Partial<Pick<FieldCard, 'currentBp' | 'canAttack' | 'protectedFromBattleCardRemoval' | 'turnsOnField' | 'replacementUsed'>> & {
+  | (Partial<Pick<FieldCard, 'currentBp' | 'canAttack' | 'protectedFromBattleCardRemoval' | 'turnsOnField' | 'replacementUsed' | 'attached'>> & {
       label: string;
     })
   | null;
@@ -86,7 +89,7 @@ function toFieldCard(spec: FieldSlotSpec): FieldCard | null {
   const card: FieldCard = {
     label,
     currentBp: isObj && spec.currentBp !== undefined ? spec.currentBp : printed?.bp ?? 0,
-    attached: [],
+    attached: isObj && spec.attached !== undefined ? [...spec.attached] : [],
     turnsOnField: isObj && spec.turnsOnField !== undefined ? spec.turnsOnField : 0,
   };
   if (isObj && spec.canAttack !== undefined) card.canAttack = spec.canAttack;

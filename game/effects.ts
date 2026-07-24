@@ -540,6 +540,20 @@ export function isPlayLegal(G: ShadowkhanG, pid: string, label: string): boolean
   return !gate || gate.check(G, pid);
 }
 
+/** Labels whose activateAbility usage resets every turn instead of the
+ *  normal once-EVER FieldCard.activated flag — currently just Sk-26a
+ *  ("Once per turn, you can..."). activateAbility's own move body (game.ts)
+ *  skips setting/checking `activated` entirely for a repeatable card; the
+ *  actual once-per-turn cap reuses the SAME hasActiveEffect('cannotUseEffects')
+ *  check that move already runs for every card, driven by a short-lived
+ *  ActiveEffect Sk-26a's own onActivate handler creates on itself (expires
+ *  at the end of the current turn) — no new gate, no new flag. */
+const REPEATABLE_ACTIVATIONS = new Set<string>(['Sk-26']);
+
+export function isRepeatableActivation(label: string): boolean {
+  return REPEATABLE_ACTIVATIONS.has(label);
+}
+
 // ---------------------------------------------------------------------------
 // Ability data — the executable layer. Keyed by card label, kept separate
 // from cards.ts so the human-readable `effects` text there stays untouched.
@@ -1308,6 +1322,64 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
+  // Sk-26 ABDUCTION SAUCER, effect a: "Once per turn, you can select one
+  // Battle Card on your opponent's field and place it under this card. When
+  // this card is removed, remove all cards under this card." Optional ("you
+  // can"), onActivate-triggered — see isRepeatableActivation for how "once
+  // per turn" (not activateAbility's usual once-EVER) is enforced: the
+  // self-imposed 'cannotUseEffects' lock below, expiring at the end of THIS
+  // turn, is what actually caps it.
+  //
+  // CHOICE_READY pre-check: does the opponent have any Battle Card at all?
+  // Deliberately NOT pre-filtered for protection (protectedFromBattleCardRemoval
+  // / an active protectedFromRemoval effect) — same shape as Sk-05a, which
+  // already offers every opposing Battle Card regardless and lets
+  // removeFieldCard's own check silently block a protected one. "A card
+  // protected from removal must not be silently stealable" is satisfied by
+  // that SAME existing check, reused unchanged: the take routes through
+  // removeFieldCard('ability') exactly like any other ability-driven
+  // removal, so a protected card is never actually taken — the option can be
+  // chosen, but nothing happens.
+  //
+  // "Place it under this card" only happens via afterRemoved, which
+  // removeFieldCard only ever invokes once a removal has GENUINELY
+  // completed — never on 'prevented', and (this is the important part) not
+  // even on 'pending' unless the ORIGINAL target is what actually got
+  // banished. A self-hook never intervenes here (Sk-15b/19a/25b are all
+  // battle-only, and this is always cause: 'ability'), but a GUARDIAN can
+  // (Sk-29a/30a place no cause restriction) — if the guardian substitutes
+  // itself instead, afterRemoved still fires, but for the GUARDIAN's own
+  // banished label, not the originally-targeted card's. Matching by label
+  // (not by "a removal happened") is what makes this correct with no
+  // guardian-specific special-casing: the label search below simply finds
+  // nothing and does nothing when the original target was saved.
+  'Sk-26': [
+    {
+      slot: 'a',
+      trigger: 'onActivate',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const globalTurns = G.public.turnsTaken['0'] + G.public.turnsTaken['1'];
+        G.public.activeEffects.push({
+          kinds: ['cannotUseEffects'],
+          targetPid: self.pid,
+          targetSlot: self.slot,
+          sourceLabel: 'Sk-26',
+          sourcePid: self.pid,
+          sourceSlot: self.slot,
+          expiresAtGlobalTurn: globalTurns + 1,
+        });
+
+        const opp = self.pid === '0' ? '1' : '0';
+        const options = G.public.field[opp]
+          .map((c, i) => (c && CARD_BY_LABEL[c.label]?.type === 'battle' ? i : null))
+          .filter((i): i is number => i !== null);
+        if (options.length === 0) return;
+        openChoice(G, ctx, self, 'Sk-26', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-26']['a-target']);
+      },
+    },
+  ],
+
   // Sk-28 SKULLFACE: only effect a is wired — "Remove all cards in your hand
   // and place this card in your opponent's deck." Unconditional, no target
   // choice ("all" cards, and the card relocates itself rather than a chosen
@@ -1500,12 +1572,16 @@ export interface RemovalHook {
   eligible: (G: ShadowkhanG, pid: string, card: FieldCard, cause: RemovalCause) => boolean;
   /** Opens the confirm prompt. Its resolve() owns finishing the removal on
    *  both branches: apply the replacement, or fall through to a normal
-   *  removal via finishFieldRemoval. */
+   *  removal via finishFieldRemoval — which now needs `cause` too (see
+   *  ATTACHED_CARDS_ON_REMOVAL), so it's threaded through here even though
+   *  every currently-wired RemovalHook only ever fires for cause ===
+   *  'battle' (their own eligible() already guarantees that). */
   openPrompt: (
     G: ShadowkhanG,
     ctx: EngineCtx,
     pid: string,
     slot: number,
+    cause: RemovalCause,
     opts: RemovalOpts | undefined
   ) => void;
 }
@@ -1522,7 +1598,7 @@ const REMOVAL_HOOKS: Record<string, RemovalHook> = {
   'Sk-15': {
     slot: 'b',
     eligible: (_G, _pid, _card, cause) => cause === 'battle',
-    openPrompt: (G, ctx, pid, slot, opts) => {
+    openPrompt: (G, ctx, pid, slot, cause, opts) => {
       const key = 'removal-confirm';
       (CHOICE_ABILITIES_BY_LABEL['Sk-15'] ??= {})[key] = {
         needsChoice: true,
@@ -1538,7 +1614,7 @@ const REMOVAL_HOOKS: Record<string, RemovalHook> = {
             }
             return;
           }
-          finishFieldRemoval(G2, ctx2, self2.pid, self2.slot, opts);
+          finishFieldRemoval(G2, ctx2, self2.pid, self2.slot, cause, opts);
         },
       };
       openChoice(G, ctx, { pid, slot }, 'Sk-15', key, CHOICE_ABILITIES_BY_LABEL['Sk-15'][key]);
@@ -1552,7 +1628,7 @@ const REMOVAL_HOOKS: Record<string, RemovalHook> = {
   'Sk-19': {
     slot: 'a',
     eligible: (_G, _pid, card, cause) => cause === 'battle' && !card.replacementUsed,
-    openPrompt: (G, ctx, pid, slot, opts) => {
+    openPrompt: (G, ctx, pid, slot, cause, opts) => {
       const key = 'removal-confirm';
       (CHOICE_ABILITIES_BY_LABEL['Sk-19'] ??= {})[key] = {
         needsChoice: true,
@@ -1565,7 +1641,7 @@ const REMOVAL_HOOKS: Record<string, RemovalHook> = {
             if (c) c.replacementUsed = true;
             return;
           }
-          finishFieldRemoval(G2, ctx2, self2.pid, self2.slot, opts);
+          finishFieldRemoval(G2, ctx2, self2.pid, self2.slot, cause, opts);
         },
       };
       openChoice(G, ctx, { pid, slot }, 'Sk-19', key, CHOICE_ABILITIES_BY_LABEL['Sk-19'][key]);
@@ -1580,7 +1656,7 @@ const REMOVAL_HOOKS: Record<string, RemovalHook> = {
     slot: 'b',
     eligible: (G, pid, _card, cause) =>
       cause === 'battle' && G.secret.hands[pid].some((label) => CARD_BY_LABEL[label]?.type === 'action'),
-    openPrompt: (G, ctx, pid, slot, opts) => {
+    openPrompt: (G, ctx, pid, slot, cause, opts) => {
       const key = 'removal-confirm';
       (CHOICE_ABILITIES_BY_LABEL['Sk-25'] ??= {})[key] = {
         needsChoice: true,
@@ -1603,7 +1679,7 @@ const REMOVAL_HOOKS: Record<string, RemovalHook> = {
             );
             return;
           }
-          finishFieldRemoval(G2, ctx2, self2.pid, self2.slot, opts);
+          finishFieldRemoval(G2, ctx2, self2.pid, self2.slot, cause, opts);
         },
       };
       openChoice(G, ctx, { pid, slot }, 'Sk-25', key, CHOICE_ABILITIES_BY_LABEL['Sk-25'][key]);
@@ -1643,15 +1719,19 @@ export interface GuardianHook {
   /** Opens the confirm prompt. Its resolve() owns finishing on both
    *  branches, exactly like RemovalHook.openPrompt: apply the guardian's
    *  substitution/redirect, or fall through to the ORIGINAL removal via
-   *  finishFieldRemoval(G, ctx, pid, removedSlot, opts) — never a recursive
-   *  call back into removeFieldCard, for the same no-infinite-loop reason
-   *  RemovalHook's resolve()s call finishFieldRemoval directly. */
+   *  finishFieldRemoval(G, ctx, pid, removedSlot, cause, opts) — never a
+   *  recursive call back into removeFieldCard, for the same no-infinite-loop
+   *  reason RemovalHook's resolve()s call finishFieldRemoval directly.
+   *  Unlike RemovalHook, guards() is never cause-restricted, so `cause` here
+   *  can genuinely be either value — threaded through so finalizeFieldRemoval
+   *  (via ATTACHED_CARDS_ON_REMOVAL) sees the real one, not an assumption. */
   openPrompt: (
     G: ShadowkhanG,
     ctx: EngineCtx,
     pid: string,
     guardianSlot: number,
     removedSlot: number,
+    cause: RemovalCause,
     opts: RemovalOpts | undefined
   ) => void;
 }
@@ -1670,7 +1750,7 @@ const GUARDIAN_HOOKS: Record<string, GuardianHook> = {
     slot: 'a',
     guards: (_G, _pid, _guardianSlot, removedCard, _cause) =>
       CARD_BY_LABEL[removedCard.label]?.type === 'battle' && removedCard.currentBp <= 4,
-    openPrompt: (G, ctx, pid, guardianSlot, removedSlot, opts) => {
+    openPrompt: (G, ctx, pid, guardianSlot, removedSlot, cause, opts) => {
       const key = 'guard-confirm';
       (CHOICE_ABILITIES_BY_LABEL['Sk-29'] ??= {})[key] = {
         needsChoice: true,
@@ -1679,10 +1759,10 @@ const GUARDIAN_HOOKS: Record<string, GuardianHook> = {
         getOptions: () => null,
         resolve: (G2, ctx2, _self2, answer2) => {
           if (answer2 === true) {
-            finishFieldRemoval(G2, ctx2, pid, guardianSlot, opts);
+            finishFieldRemoval(G2, ctx2, pid, guardianSlot, cause, opts);
             return;
           }
-          finishFieldRemoval(G2, ctx2, pid, removedSlot, opts);
+          finishFieldRemoval(G2, ctx2, pid, removedSlot, cause, opts);
         },
       };
       openChoice(G, ctx, { pid, slot: guardianSlot }, 'Sk-29', key, CHOICE_ABILITIES_BY_LABEL['Sk-29'][key]);
@@ -1706,7 +1786,7 @@ const GUARDIAN_HOOKS: Record<string, GuardianHook> = {
     slot: 'a',
     guards: (G, pid, _guardianSlot, removedCard, _cause) =>
       CARD_BY_LABEL[removedCard.label]?.name === 'SHADOW GHOST' && G.secret.hands[pid].length > 0,
-    openPrompt: (G, ctx, pid, guardianSlot, removedSlot, opts) => {
+    openPrompt: (G, ctx, pid, guardianSlot, removedSlot, cause, opts) => {
       const key = 'guard-confirm';
       (CHOICE_ABILITIES_BY_LABEL['Sk-30'] ??= {})[key] = {
         needsChoice: true,
@@ -1715,13 +1795,13 @@ const GUARDIAN_HOOKS: Record<string, GuardianHook> = {
         getOptions: () => null,
         resolve: (G2, ctx2, _self2, answer2) => {
           if (answer2 !== true) {
-            finishFieldRemoval(G2, ctx2, pid, removedSlot, opts);
+            finishFieldRemoval(G2, ctx2, pid, removedSlot, cause, opts);
             return;
           }
           // Defensive re-check: `guards` already gates on hand.length > 0
           // before this prompt can even open, so this should never trigger.
           if (G2.secret.hands[pid].length === 0) {
-            finishFieldRemoval(G2, ctx2, pid, removedSlot, opts);
+            finishFieldRemoval(G2, ctx2, pid, removedSlot, cause, opts);
             return;
           }
           const removedCard = G2.public.field[pid][removedSlot];
@@ -1852,6 +1932,91 @@ function expireScheduledSummonsForSlot(G: ShadowkhanG, pid: string, slot: number
   );
 }
 
+/**
+ * Sk-26b: "If this card is removed by a card effect, return as many of your
+ * opponent's cards to their field as possible, with the rest going back to
+ * the deck." A MORE SPECIFIC override of Sk-26a's own generic "when this
+ * card is removed, remove all cards under this card" — applies only for
+ * cause === 'ability' ("card effect"); a battle-loss removal falls through
+ * to the generic banish in finalizeFieldRemoval instead (see
+ * ATTACHED_CARDS_ON_REMOVAL).
+ *
+ * Processes `labels` (the cards that were held) one at a time: while the
+ * opponent's field has an empty slot, places the next one via
+ * placeCardOnField directly (single slot) or a real 'emptyOwnFieldSlot'
+ * choice (2+ slots, exactly what dispatchPlacement itself would open) —
+ * either way the card fires onSummon like any other placement. Once no
+ * empty slot remains, every remaining label goes to the BOTTOM of the
+ * opponent's deck instead (the printed text names no position; this matches
+ * Sk-07b's own "place it at the bottom of your deck" as the closest existing
+ * convention in this ruleset rather than inventing a new one). Recurses into
+ * the rest of the list from inside a multi-slot choice's own resolve — the
+ * same chained-choice shape already used elsewhere (e.g. Sk-03b's
+ * search-then-placement chain), not a new pattern. The choice belongs to
+ * `opp` (their own field, their own decision which empty slot) — sourceSlot
+ * -1 is the existing "no field-resident source" sentinel already used by
+ * resolvePendingChoice's own self reconstruction.
+ */
+function returnHeldCardsToOpponent(
+  G: ShadowkhanG,
+  ctx: EngineCtx,
+  opp: string,
+  labels: string[]
+): void {
+  if (labels.length === 0) return;
+  const [label, ...rest] = labels;
+
+  const emptySlots = (G2: ShadowkhanG) =>
+    G2.public.field[opp].map((c, i) => (c === null ? i : null)).filter((i): i is number => i !== null);
+
+  const slots = emptySlots(G);
+  if (slots.length === 0) {
+    G.secret.decks[opp].push(label); // bottom of the deck
+    returnHeldCardsToOpponent(G, ctx, opp, rest);
+    return;
+  }
+  if (slots.length === 1) {
+    placeCardOnField(G, ctx, opp, slots[0], label);
+    returnHeldCardsToOpponent(G, ctx, opp, rest);
+    return;
+  }
+
+  const key = `b-return-${label}`;
+  const placementChoice: ChoiceAbility = {
+    needsChoice: true,
+    prompt: `Abduction Saucer: choose which empty field slot to return ${label} to.`,
+    kind: 'emptyOwnFieldSlot',
+    getOptions: (G2) => emptySlots(G2),
+    resolve: (G2, ctx2, _self2, answer) => {
+      if (typeof answer !== 'number') return;
+      if (!emptySlots(G2).includes(answer)) return;
+      placeCardOnField(G2, ctx2, opp, answer, label);
+      returnHeldCardsToOpponent(G2, ctx2, opp, rest);
+    },
+  };
+  (CHOICE_ABILITIES_BY_LABEL['Sk-26'] ??= {})[key] = placementChoice;
+  openChoice(G, ctx, { pid: opp, slot: -1 }, 'Sk-26', key, placementChoice);
+}
+
+/** Card-specific handling for what happens to a REMOVED card's own attached
+ *  cards, keyed by the HOST's label — consulted inside finalizeFieldRemoval
+ *  BEFORE its default (banish them all face-up) applies. Returns true if it
+ *  fully handled the attached cards itself (skip the default banish); false
+ *  to fall through to it. Currently just Sk-26 — see
+ *  returnHeldCardsToOpponent's own doc comment for the two-tier reading
+ *  (effect a's generic "remove" vs effect b's more specific "return"). */
+const ATTACHED_CARDS_ON_REMOVAL: Record<
+  string,
+  (G: ShadowkhanG, ctx: EngineCtx, pid: string, cause: RemovalCause, attachedLabels: string[]) => boolean
+> = {
+  'Sk-26': (G, ctx, pid, cause, attachedLabels) => {
+    if (cause !== 'ability') return false; // battle loss: fall through to the default banish
+    const opp = pid === '0' ? '1' : '0';
+    returnHeldCardsToOpponent(G, ctx, opp, attachedLabels);
+    return true;
+  },
+};
+
 /** Mechanical "make it gone": banishes the card at pid/slot. No hook check,
  *  no trigger — the low-level primitive both finishFieldRemoval and a
  *  declined replacement's own resolve() share. The sole choke point for
@@ -1860,23 +2025,31 @@ function expireScheduledSummonsForSlot(G: ShadowkhanG, pid: string, slot: number
  *  every other path into `banished` (hand/deck removal) leaves it untagged.
  *
  *  Any cards attached to this one (see FieldCard.attached / ATTACH_TARGETS)
- *  are banished face-up alongside it: the printed text never says what
- *  becomes of an attach-target card once its host is gone, but "used on"
- *  language implies it was consumed as an enhancement, not left to persist
- *  independently — matching how an equipment/aura-shaped card conventionally
- *  falls with its host elsewhere in this ruleset's own removal handling
- *  (nothing in this engine has a card outlive the field slot it depends on).
- *  Tagged field-origin too, same as the host: an attached card WAS on the
- *  field via its host, even though it never had a field slot of its own. */
-function finalizeFieldRemoval(G: ShadowkhanG, pid: string, slot: number): void {
+ *  are handled next: ATTACHED_CARDS_ON_REMOVAL[card.label], if the removed
+ *  card has an entry there, decides what happens to them (Sk-26b's
+ *  "return" — see returnHeldCardsToOpponent). Absent an entry, or if the
+ *  entry declines to handle it (Sk-26's own battle-cause case), the default
+ *  applies: banished face-up alongside the host, and tagged field-origin
+ *  too, same as the host — the printed text generally never says what
+ *  becomes of an attach-target card once its host is gone, but "used on" /
+ *  "place it under this card" language implies it was consumed as an
+ *  enhancement, not left to persist independently (nothing else in this
+ *  engine has a card outlive the field slot it depends on). */
+function finalizeFieldRemoval(G: ShadowkhanG, ctx: EngineCtx, pid: string, slot: number, cause: RemovalCause): void {
   const card = G.public.field[pid][slot];
   if (!card) return;
   G.public.banished[pid].push(card.label);
   G.public.banishedFromField[pid].push(card.label);
-  for (const attachedLabel of card.attached) {
-    G.public.banished[pid].push(attachedLabel);
-    G.public.banishedFromField[pid].push(attachedLabel);
+
+  const attachedLabels = card.attached;
+  const handled = ATTACHED_CARDS_ON_REMOVAL[card.label]?.(G, ctx, pid, cause, attachedLabels) ?? false;
+  if (!handled) {
+    for (const attachedLabel of attachedLabels) {
+      G.public.banished[pid].push(attachedLabel);
+      G.public.banishedFromField[pid].push(attachedLabel);
+    }
   }
+
   G.public.field[pid][slot] = null;
   expireEffectsForSlot(G, pid, slot);
   expireScheduledSummonsForSlot(G, pid, slot);
@@ -1891,10 +2064,11 @@ function finishFieldRemoval(
   ctx: EngineCtx,
   pid: string,
   slot: number,
+  cause: RemovalCause,
   opts: RemovalOpts | undefined
 ): void {
   if (opts?.fireOnRemoved) fireTrigger(G, ctx, 'onRemoved', { pid, slot });
-  finalizeFieldRemoval(G, pid, slot);
+  finalizeFieldRemoval(G, ctx, pid, slot, cause);
   opts?.afterRemoved?.(G, ctx);
 }
 
@@ -1966,7 +2140,7 @@ export function removeFieldCard(
 
   const hook = REMOVAL_HOOKS[card.label];
   if (hook && hook.eligible(G, pid, card, cause)) {
-    hook.openPrompt(G, ctx, pid, slot, opts);
+    hook.openPrompt(G, ctx, pid, slot, cause, opts);
     return 'pending';
   }
 
@@ -1977,12 +2151,12 @@ export function removeFieldCard(
     if (!guardianCard) continue;
     const guardianHook = GUARDIAN_HOOKS[guardianCard.label];
     if (guardianHook && guardianHook.guards(G, pid, guardianSlot, card, cause)) {
-      guardianHook.openPrompt(G, ctx, pid, guardianSlot, slot, opts);
+      guardianHook.openPrompt(G, ctx, pid, guardianSlot, slot, cause, opts);
       return 'pending';
     }
   }
 
-  finishFieldRemoval(G, ctx, pid, slot, opts);
+  finishFieldRemoval(G, ctx, pid, slot, cause, opts);
   return 'removed';
 }
 
@@ -2341,6 +2515,54 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
             }
           }
         );
+      },
+    },
+  },
+
+  // Sk-26 ABDUCTION SAUCER target step. Only reachable via the dispatcher in
+  // ABILITIES_BY_LABEL['Sk-26'] above. `targetLabel` is captured BEFORE the
+  // removal, from this resolve's own fresh G — a plain string, safe to
+  // close over in afterRemoved even if a guardian defers this to a later
+  // move dispatch (see the ordering note on ABILITIES_BY_LABEL['Sk-26']).
+  'Sk-26': {
+    'a-target': {
+      needsChoice: true,
+      prompt: "Abduction Saucer: choose one of your opponent's Battle Cards to place under this card.",
+      kind: 'opponentField',
+      getOptions: (G, _ctx, self) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        return G.public.field[opp]
+          .map((c, i) => (c && CARD_BY_LABEL[c.label]?.type === 'battle' ? i : null))
+          .filter((i): i is number => i !== null);
+      },
+      resolve: (G, ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const opp = self.pid === '0' ? '1' : '0';
+        const hostPid = self.pid;
+        const hostSlot = self.slot;
+        const targetCard = G.public.field[opp][answer];
+        if (!targetCard) return;
+        const targetLabel = targetCard.label;
+        removeFieldCard(G, ctx, opp, answer, 'ability', {
+          afterRemoved: (G2) => {
+            const pile = G2.public.banished[opp];
+            const idx = pile.indexOf(targetLabel);
+            if (idx === -1) return; // the original target was saved (e.g. a guardian substituted itself) — nothing to take
+            pile.splice(idx, 1);
+            untagBanishedFromField(G2, opp, targetLabel);
+            const host = G2.public.field[hostPid][hostSlot];
+            if (!host) {
+              // Sk-26 itself is somehow gone by the time this resolves —
+              // not reachable today (nothing before this removes it), but
+              // fall back to leaving the card banished rather than losing
+              // it silently.
+              G2.public.banished[opp].push(targetLabel);
+              G2.public.banishedFromField[opp].push(targetLabel);
+              return;
+            }
+            host.attached.push(targetLabel);
+          },
+        });
       },
     },
   },
@@ -3164,8 +3386,6 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-18', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-18a's copy-identity selection, which is still blocked — see Sk-18a." },
   { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'shuffle them face-down, flip the top card face-up, and if you call it correctly...' — the randomness half (EngineCtx/random.Shuffle, wired for Sk-07a this pass) is no longer the blocker. What's still missing is the guessing interaction itself: a way for the player to submit a guess BEFORE the flip, and a PendingChoiceKind/resolve shape that reveals the flipped card and compares it to that guess — none of which exists. Deliberately not attempted this pass (out of scope: needs a guessing interaction beyond randomness, not just a shuffle)." },
   { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome, which is itself still blocked — see Sk-21a." },
-  { label: 'Sk-26', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can select one Battle Card...place it under this card' — the underlying attach mechanism now exists (FieldCard.attached / ATTACH_TARGETS / attachCardToHost, added for Sk-09), but Sk-26a's own shape is considerably more than Sk-09's: it targets a card on the OPPONENT's field (not a fixed named card), is repeatable ('once per turn', not a one-shot attach), and needs 'remove all cards under this card' wired into its own removal handling. Deliberately not attempted this pass — out of scope, not blocked by the same gap as before." },
-  { label: 'Sk-26', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Depends entirely on Sk-26a, which is deferred — nothing will ever be attached to return. Also needs its own 'return from under this card to the field, overflow to the deck' logic, distinct from anything Sk-09 needed." },
   { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },
   { label: 'Sk-28', slot: 'c', classification: 'NOT_IMPLEMENTED', reason: 'Same missing infrastructure as slot b — and this branch is a turn-count timeout, not a draw event, so onDraw does not apply to it at all.' },
 ];

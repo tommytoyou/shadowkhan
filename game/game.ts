@@ -21,6 +21,7 @@ import {
   resolveScheduledSummons,
   getAttachTarget,
   attachCardToHost,
+  isRepeatableActivation,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -355,6 +356,14 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       },
     },
 
+    // Most activated abilities are once-EVER (card.activated, set permanently
+    // on first use). Sk-26a is once-PER-TURN — isRepeatableActivation flags
+    // it so this move skips the permanent flag entirely for it, relying
+    // solely on the SAME hasActiveEffect('cannotUseEffects') check every
+    // activated ability already passes through: Sk-26a's own onActivate
+    // handler pushes a short-lived (expires at the end of this turn)
+    // 'cannotUseEffects' ActiveEffect on itself, which this check already
+    // catches for a second attempt THIS turn — no new gate needed here.
     activateAbility: {
       client: false,
       move: ({ G, ctx, random, events }, cardFieldIndex: number) => {
@@ -364,10 +373,11 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         const card = G.public.field[pid][cardFieldIndex];
         if (!card) return INVALID_MOVE;
-        if (card.activated) return INVALID_MOVE;
+        const repeatable = isRepeatableActivation(card.label);
+        if (!repeatable && card.activated) return INVALID_MOVE;
         if (hasActiveEffect(G, pid, cardFieldIndex, 'cannotUseEffects')) return INVALID_MOVE;
 
-        card.activated = true;
+        if (!repeatable) card.activated = true;
         fireTrigger(G, { ctx, random, events }, 'onActivate', { pid, slot: cardFieldIndex });
       },
     },

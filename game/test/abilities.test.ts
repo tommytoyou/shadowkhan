@@ -2654,3 +2654,121 @@ describe('Sk-09 POWER OF THE SHADOWS (attach target)', () => {
     expect(G().public.banished['0']).not.toContain('Sk-15');
   });
 });
+
+describe('Sk-26 ABDUCTION SAUCER (steal-and-hold, once per turn)', () => {
+  test('109. takes an opponent Battle Card: it leaves their field and is held, publicly visible to both clients', () => {
+    const { client, G, G1 } = createTestGame({
+      players: {
+        '0': { field: ['Sk-26', null, null] },
+        '1': { field: ['Sk-20'] }, // BP2 Battle Card
+      },
+    });
+
+    client.moves.activateAbility(0);
+
+    const pending = G().public.pendingChoice;
+    expect(pending?.kind).toBe('opponentField');
+    expect(pending?.sourceLabel).toBe('Sk-26');
+    expect(pending?.abilitySlot).toBe('a-target');
+    expect(pending?.options).toEqual([0]);
+
+    client.moves.resolveChoice(0);
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]).toBeNull(); // left the opponent's field
+    expect(G().public.field['0'][0]?.attached).toEqual(['Sk-20']); // held under Sk-26
+    expect(G().public.banished['1']).not.toContain('Sk-20'); // never actually banished, redirected
+
+    // Publicity, not secrecy: FieldCard.attached lives in G.public, so both
+    // clients see the SAME held card, including the opponent it was taken
+    // from — "place it under this card" is a physical, face-up action, and
+    // nothing in the text says otherwise (unlike Sk-06's own secret
+    // scheduled-summon queue, which IS a hidden deck selection).
+    expect(G1().public.field['0'][0]?.attached).toEqual(['Sk-20']);
+  });
+
+  test('110. a second attempt in the same turn is rejected; it works again on the next turn', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        // deck fillers on both sides: once bothReady goes true (after both
+        // players have taken a turn), turn.onBegin attempts a normal draw
+        // for whoever's turn is starting, and an empty deck there would
+        // auto-lose that player before this test's own assertions run.
+        '0': { field: ['Sk-26', null, null], deck: ['Sk-02'] },
+        '1': { field: ['Sk-20', 'Sk-21'], deck: ['Sk-01'] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+    client.moves.resolveChoice(0); // takes Sk-20 (slot 0)
+
+    client.moves.activateAbility(0); // same turn, second attempt
+
+    expect(G().public.pendingChoice).toBeNull(); // rejected outright — no trigger fired
+    expect(G().public.field['1'][0]).toBeNull(); // Sk-20's slot, still empty
+    expect(G().public.field['1'][1]?.label).toBe('Sk-21'); // untouched — still in its original slot
+    expect(G().public.field['0'][0]?.attached).toEqual(['Sk-20']); // no second card taken
+
+    client.moves.endTurn(); // globalTurns -> 1, the lock (expires at 1) is already gone
+    client1.moves.endTurn(); // globalTurns -> 2, back to player 0's turn
+
+    client.moves.activateAbility(0); // succeeds again
+    client.moves.resolveChoice(1); // Sk-21 is still at slot 1 — the only candidate now
+
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.field['0'][0]?.attached).toEqual(['Sk-20', 'Sk-21']);
+  });
+
+  test('111. a card the opponent has protected cannot be taken', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-26', null, null] },
+        '1': { field: [{ label: 'Sk-20', protectedFromBattleCardRemoval: true }] },
+      },
+    });
+
+    client.moves.activateAbility(0);
+    client.moves.resolveChoice(0); // Sk-20 is still offered as a target — the option itself isn't pre-filtered
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]?.label).toBe('Sk-20'); // untouched — the take silently failed
+    expect(G().public.field['0'][0]?.attached).toEqual([]); // nothing taken
+    expect(G().public.banished['1']).not.toContain('Sk-20');
+  });
+
+  test('112. Sk-26b returns held cards when Sk-26 is removed by a card effect', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { field: [{ label: 'Sk-26', attached: ['Sk-20'] }, null, null] },
+        '1': { field: ['Sk-01', null, null], hand: ['Sk-05'] }, // one filler + one empty slot, so the return auto-places with no further choice
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.playCard(0, 1); // opponent plays Sk-05 targeting player 0's field
+    client1.moves.resolveChoice(0); // Sk-26 is the only Battle Card there
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]).toBeNull(); // Sk-26 removed
+    expect(G().public.banished['0']).toContain('Sk-26');
+    expect(G().public.field['1'][2]?.label).toBe('Sk-20'); // returned to its original owner's field, not banished
+    expect(G().public.banished['1']).not.toContain('Sk-20');
+  });
+
+  test('113. Sk-26 removed by an ordinary battle loss does NOT trigger 26b: held cards are banished with it, not returned', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [{ label: 'Sk-26', attached: ['Sk-20'] }, null, null], turnsTaken: 1 },
+        '1': { field: ['Sk-16'] }, // BP9 — beats Sk-26 (BP5) as defender
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0); // Sk-26 attacks and loses (battle cause)
+
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-26');
+    expect(G().public.banished['0']).toContain('Sk-20'); // banished alongside its host — NOT returned to player 1
+    expect(G().public.banishedFromField['0']).toContain('Sk-20');
+    expect(G().public.field['1'][0]?.label).toBe('Sk-16'); // player 1's own field is untouched — nothing returned there
+  });
+});
