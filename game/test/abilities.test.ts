@@ -3052,3 +3052,193 @@ describe('Sk-21 SAND SQUID (shuffle-and-guess)', () => {
     expect(G().secret.pendingFlip).toEqual({}); // still empty after resolution — cleared, never revealed
   });
 });
+
+describe('Sk-16c/d WAR DRAGON (reactive negation window)', () => {
+  test('127. Sk-16c: negating a Power Card stops its effect from ever firing, but it stays played', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-12'], field: [] },
+        // Sk-11 (power) is the one payable face-down cost card — the
+        // dispatchSearch cost step auto-resolves with no second prompt.
+        '1': { field: ['Sk-16', 'Sk-17'], hand: ['Sk-11'] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-12 (power) placed at slot 0, onSummon suppressed
+
+    expect(G().public.field['0'][0]?.label).toBe('Sk-12'); // already played, occupying its slot
+    expect(G().public.pendingChoice?.sourceLabel).toBe('Sk-16');
+    expect(G().public.pendingChoice?.abilitySlot).toBe('c-confirm');
+    expect(G().public.pendingChoice?.kind).toBe('yesNo');
+    expect(G().public.pendingChoice?.pid).toBe('1'); // War Dragon's own owner, not the acting player
+
+    client1.moves.resolveChoice(true); // negate
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-12'); // still played — negation cancels the EFFECT, not the play
+    expect(G().public.activeEffects).toEqual([]); // Sk-12's own onSummon (the lock) never fired
+    expect(G().public.handCounts['1']).toBe(0); // the face-down Power Card was paid
+    expect(G().public.banishedFaceDown['1']).toBe(1);
+    expect(G().public.banished['1']).not.toContain('Sk-11'); // paid face down, label never revealed
+  });
+
+  test('128. Sk-16c: declining lets the Power Card resolve exactly as it would with no War Dragon at all', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-12'], field: [] },
+        '1': { field: ['Sk-16', 'Sk-17'], hand: ['Sk-11'] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+    client1.moves.resolveChoice(false); // decline
+
+    // Declining resumes Sk-12's own onSummon — its own opponentField target
+    // choice, exactly as if War Dragon had never been consulted at all.
+    expect(G().public.pendingChoice?.sourceLabel).toBe('Sk-12');
+    expect(G().public.pendingChoice?.kind).toBe('opponentField');
+
+    client.moves.resolveChoice(1); // target Sk-17 (BP3, index 1)
+
+    expect(G().public.activeEffects).toHaveLength(1);
+    expect(G().public.activeEffects[0]).toMatchObject({
+      sourceLabel: 'Sk-12',
+      targetPid: '1',
+      targetSlot: 1,
+      kinds: expect.arrayContaining(['cannotAttack', 'cannotBeAttacked', 'cannotUseEffects']),
+    });
+    expect(G().public.handCounts['1']).toBe(1); // nothing paid — the cost step never opened
+    expect(G().public.banishedFaceDown['1']).toBe(0);
+  });
+
+  test('129. Sk-16c: no payable Power Card in hand — the window never opens at all', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-12'], field: [] },
+        '1': { field: ['Sk-16', 'Sk-17'], hand: [] }, // War Dragon present, but nothing to pay with
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    // Straight to Sk-12's own target choice — no 'Sk-16'/c-confirm prompt
+    // ever appeared in between.
+    expect(G().public.pendingChoice?.sourceLabel).toBe('Sk-12');
+    expect(G().public.pendingChoice?.kind).toBe('opponentField');
+
+    client.moves.resolveChoice(1);
+    expect(G().public.activeEffects).toHaveLength(1);
+    expect(G().public.banishedFaceDown['1']).toBe(0);
+  });
+
+  test('130. Sk-16d: negating an Action Card\'s field removal leaves the targeted card untouched', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-05'], field: [] },
+        // Sk-02 (action) is the one payable face-down cost card.
+        '1': { field: ['Sk-16', 'Sk-17'], hand: ['Sk-02'] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-05 (action) — onSummon fires immediately, unlike a Power Card
+    client.moves.resolveChoice(1); // Sk-05a targets Sk-17 (index 1), not War Dragon itself
+
+    expect(G().public.pendingChoice?.sourceLabel).toBe('Sk-16');
+    expect(G().public.pendingChoice?.abilitySlot).toBe('d-confirm');
+    expect(G().public.pendingChoice?.pid).toBe('1');
+    expect(G().public.field['1'][1]?.label).toBe('Sk-17'); // not removed yet — the window is still open
+
+    client1.moves.resolveChoice(true); // negate
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][1]?.label).toBe('Sk-17'); // removal never happened
+    expect(G().public.banished['1']).not.toContain('Sk-17');
+    expect(G().public.handCounts['1']).toBe(0); // Sk-02 paid face down
+    expect(G().public.banishedFaceDown['1']).toBe(1);
+    expect(G().public.banished['1']).not.toContain('Sk-02'); // paid face down, label never revealed
+  });
+
+  test('131. Sk-16d: declining lets the removal resolve exactly as it would with no War Dragon at all', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-05'], field: [] },
+        '1': { field: ['Sk-16', 'Sk-17'], hand: ['Sk-02'] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+    client.moves.resolveChoice(1);
+    client1.moves.resolveChoice(false); // decline
+
+    expect(G().public.pendingChoice).toBeNull(); // Sk-05 has no follow-up clause, unlike Sk-03b
+    expect(G().public.field['1'][1]).toBeNull(); // removed, as normal
+    expect(G().public.banished['1']).toContain('Sk-17');
+    expect(G().public.handCounts['1']).toBe(1); // nothing paid
+    expect(G().public.banishedFaceDown['1']).toBe(0);
+  });
+
+  test('132. Sk-16d: no payable Action Card in hand — the removal resolves immediately, no window opens', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-05'], field: [] },
+        '1': { field: ['Sk-16', 'Sk-17'], hand: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+    client.moves.resolveChoice(1);
+
+    // No intervening 'Sk-16' prompt — resolveChoice(1) went straight through
+    // to the removal in the same dispatch.
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][1]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-17');
+  });
+
+  test('133. the attacker (acting player) cannot act while a negation window is open', () => {
+    const { client, client1, G, G1 } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-05', 'Sk-01'], field: [] },
+        '1': { field: ['Sk-16', 'Sk-17'], hand: ['Sk-02'] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // play Sk-05
+    client.moves.resolveChoice(1); // target Sk-17 — opens Sk-16d's own window, owned by player 1
+
+    expect(G().public.pendingChoice?.pid).toBe('1');
+
+    // Player 0 (the acting player, still ctx.currentPlayer) attempts to act
+    // again while player 1's negation choice is open.
+    client.moves.playCard(0, 1); // second card, different slot
+    client.moves.endTurn();
+
+    expect(G().public.pendingChoice?.abilitySlot).toBe('d-confirm'); // still open — neither attempt got through
+    expect(G().public.field['0'][1]).toBeNull(); // the second card never got played
+    expect(G1().secret.hands['0']).toBeUndefined(); // (sanity: player 1's own view never sees player 0's hand anyway)
+    expect(client.getState()?.ctx.currentPlayer).toBe('0'); // turn never passed
+
+    client1.moves.resolveChoice(true); // the defender answers, only now can play resume
+    expect(G().public.pendingChoice).toBeNull();
+  });
+
+  test('134. with no War Dragon on the field, every existing Power and Action card resolves exactly as before', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-12', 'Sk-05'], field: [] },
+        '1': { field: ['Sk-17', 'Sk-19'] }, // no War Dragon anywhere
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-12 (power)
+    expect(G().public.pendingChoice?.sourceLabel).toBe('Sk-12'); // no 'Sk-16' window intervened
+    client.moves.resolveChoice(0); // target Sk-17
+    expect(G().public.activeEffects).toHaveLength(1);
+
+    client.moves.playCard(0, 1); // Sk-05 (action) — same hand, next slot
+    expect(G().public.pendingChoice?.sourceLabel).toBe('Sk-05');
+    client.moves.resolveChoice(1); // target Sk-19 (index 1 — Sk-17 is protected by Sk-12's own lock, but still offered)
+    expect(G().public.field['1'][1]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-19');
+  });
+});

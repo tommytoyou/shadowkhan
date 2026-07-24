@@ -23,6 +23,7 @@ import {
   effectiveLabel,
   offerSk21Gambit,
   resolveBattleOutcome,
+  offerSk16Negation,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -189,7 +190,24 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         if (G.public.field[pid][slot] !== null) return INVALID_MOVE;
         hand.splice(handIndex, 1);
-        placeCardOnField(G, { ctx, random, events }, pid, slot, label);
+        const engineCtx = { ctx, random, events };
+
+        // Sk-16c: "you may remove 1 face-down Power Card...to negate the
+        // effect of an opponent's Power Card." The card is still PLAYED —
+        // it occupies its slot exactly like any other played card (see
+        // Sk-05a's own established precedent of a resolved Action Card
+        // staying on the field) — only its own onSummon effect is what
+        // might be negated, so placement and the onSummon fire are split via
+        // suppressOnSummon, with War Dragon's reactive window in between.
+        if (card.type === 'power') {
+          placeCardOnField(G, engineCtx, pid, slot, label, { suppressOnSummon: true });
+          offerSk16Negation(G, engineCtx, pid, 'power', (G2, ctx2) => {
+            fireTrigger(G2, ctx2, 'onSummon', { pid, slot });
+          });
+          return;
+        }
+
+        placeCardOnField(G, engineCtx, pid, slot, label);
       },
     },
 

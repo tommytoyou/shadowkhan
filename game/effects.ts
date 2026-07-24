@@ -309,7 +309,16 @@ export function placeCardOnField(
   ctx: EngineCtx,
   pid: string,
   slot: number,
-  label: string
+  label: string,
+  /** suppressOnSummon: true delays the onSummon firing to a later, separate
+   *  call the caller makes itself — used only by playCard's Power-card path
+   *  (see offerSk16Negation) so a card can be genuinely PLAYED (occupying
+   *  its slot, exactly like any other card in this engine — see Sk-05a's own
+   *  established precedent of a resolved Action Card staying on the field)
+   *  while its own onSummon effect stays paused behind Sk-16c's reactive
+   *  interrupt window. Every other caller omits this and keeps the original
+   *  atomic behavior unchanged. */
+  opts?: { suppressOnSummon?: boolean }
 ): void {
   const printed = CARD_BY_LABEL[label];
   G.public.field[pid][slot] = {
@@ -319,7 +328,9 @@ export function placeCardOnField(
     turnsOnField: 0,
   };
   syncCounts(G);
-  fireTrigger(G, ctx, 'onSummon', { pid, slot });
+  if (!opts?.suppressOnSummon) {
+    fireTrigger(G, ctx, 'onSummon', { pid, slot });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2464,6 +2475,119 @@ export function offerSk21Gambit(
   return true;
 }
 
+/**
+ * Sk-16 WAR DRAGON, effects c and d — the shared reactive-interrupt shape
+ * behind both: "You may remove 1 face-down [Power|Action] Card from your
+ * hand [during either player's turn, for d] to negate [an opponent's Power
+ * Card's effect | your opponent's Action Card removing 1 card from the
+ * field]." Neither prints "once" anywhere (unlike Sk-19a's explicit "Once
+ * after..."), so both are repeatable — bounded only by having another
+ * payable face-down card in hand each time, the same natural self-limiting
+ * every other hand-cost ability in this file already has, with no separate
+ * once-only flag invented.
+ *
+ * `actingPid` is whoever's card is being negated (the Power card's own
+ * player for c, or the Action card's own player for d) — "your opponent's
+ * ..." reads from WAR DRAGON's controller's own perspective, so the
+ * defender this window is offered to is always actingPid's OPPONENT.
+ *
+ * `effectIfNotNegated` runs exactly once: immediately, with no prompt at
+ * all, if the defender has no War Dragon or nothing to pay with (the
+ * zero-target gate — "the window only opens when the defender can actually
+ * pay"); from the yesNo's own decline branch; or never, if the defender
+ * successfully negates. `afterEither`, when given, ALWAYS runs once the
+ * whole window has fully settled either way — Sk-16d needs this because
+ * Sk-03b's own War Dragon retrieval is a SEPARATE clause of its own effect,
+ * not itself part of what gets negated, and must still happen regardless.
+ *
+ * PAUSE, not undo: this is called from inside the acting card's own resolve,
+ * BEFORE the real effect (placing a Power Card's onSummon fire, or an Action
+ * Card's field removal) has happened at all — see the two call sites
+ * (playCard in game.ts for c; CHOICE_ABILITIES_BY_LABEL['Sk-03']['b-remove']
+ * and ['Sk-05']['a-target'] for d). Resumption is exactly `effectIfNotNegated`
+ * running, from inside this SAME function's own resolve chain — there is no
+ * separate "undo" path, because nothing ever ran to undo.
+ *
+ * Cost payment reuses dispatchSearch over the defender's own hand (zone:
+ * 'hand', predicate: matching costType) — the SAME ordinal-secrecy scheme
+ * every other secret-zone search in this file already uses, so the specific
+ * face-down card's identity is never exposed to pendingChoice.options, and
+ * banishHandCardFaceDown (also pre-existing, Sk-25b's own cost shape) never
+ * writes the label anywhere public — only the face-down COUNT increments.
+ *
+ * Not itself re-interruptible: the cost payment removes a card from the
+ * defender's own HAND via banishHandCardFaceDown, never a field slot and
+ * never a Power Card being played — so nothing this function does can ever
+ * satisfy the trigger condition for ANOTHER Sk-16c/d offer. This function is
+ * only ever called FROM a Power-card play or an Action-card removal, never
+ * from within its own resolve chain, so there is no path back into itself.
+ */
+export function offerSk16Negation(
+  G: ShadowkhanG,
+  ctx: EngineCtx,
+  actingPid: string,
+  costType: 'power' | 'action',
+  effectIfNotNegated: (G: ShadowkhanG, ctx: EngineCtx) => void,
+  afterEither?: (G: ShadowkhanG, ctx: EngineCtx) => void
+): void {
+  const defender = actingPid === '0' ? '1' : '0';
+
+  const hasWarDragon = (G2: ShadowkhanG): boolean =>
+    G2.public.field[defender].some((c) => c && CARD_BY_LABEL[effectiveLabel(c)]?.name === 'WAR DRAGON');
+  const payableCount = (G2: ShadowkhanG): number =>
+    G2.secret.hands[defender].filter((l) => CARD_BY_LABEL[l]?.type === costType).length;
+
+  const proceed = (G2: ShadowkhanG, ctx2: EngineCtx): void => {
+    effectIfNotNegated(G2, ctx2);
+    afterEither?.(G2, ctx2);
+  };
+
+  if (!hasWarDragon(G) || payableCount(G) === 0) {
+    proceed(G, ctx);
+    return;
+  }
+
+  const key = costType === 'power' ? 'c-confirm' : 'd-confirm';
+  const costKey = costType === 'power' ? 'c-cost' : 'd-cost';
+  const confirmChoice: ChoiceAbility = {
+    needsChoice: true,
+    prompt:
+      costType === 'power'
+        ? "War Dragon: remove 1 face-down Power Card from your hand to negate your opponent's Power Card?"
+        : "War Dragon: remove 1 face-down Action Card from your hand to negate your opponent's Action Card removing a card from the field?",
+    kind: 'yesNo',
+    getOptions: () => null,
+    resolve: (G2, ctx2, self2, answer) => {
+      if (answer !== true) {
+        proceed(G2, ctx2);
+        return;
+      }
+      dispatchSearch(
+        G2,
+        ctx2,
+        self2,
+        'Sk-16',
+        costKey,
+        'hand',
+        defender,
+        (l) => CARD_BY_LABEL[l]?.type === costType,
+        costType === 'power'
+          ? 'Choose which face-down Power Card to remove.'
+          : 'Choose which face-down Action Card to remove.',
+        (G3, ctx3, owner, handIndex) => {
+          banishHandCardFaceDown(G3, owner, handIndex);
+          afterEither?.(G3, ctx3);
+        }
+      );
+    },
+  };
+  (CHOICE_ABILITIES_BY_LABEL['Sk-16'] ??= {})[key] = confirmChoice;
+  const warDragonSlot = G.public.field[defender].findIndex(
+    (c) => c && CARD_BY_LABEL[effectiveLabel(c)]?.name === 'WAR DRAGON'
+  );
+  openChoice(G, ctx, { pid: defender, slot: warDragonSlot }, 'Sk-16', key, confirmChoice);
+}
+
 // ---------------------------------------------------------------------------
 // Named/attribute card search primitive. A single reusable engine for every
 // ability whose effect text is "find a card by name/type/BP/tier in a hand,
@@ -2783,7 +2907,12 @@ function eligibleOwnBattleCardsAtOrBelow(
 
 const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> = {
   // Sk-03 ARRIVAL OF DOOM confirm steps. Only reachable via the dispatcher in
-  // ABILITIES_BY_LABEL['Sk-03'] above.
+  // ABILITIES_BY_LABEL['Sk-03'] above. The removal step is Sk-16d's own
+  // target — "remove 1 card from the field" — regardless of whose field
+  // it's from; the War Dragon search that follows is a SEPARATE clause of
+  // Sk-03's own effect ("add one War Dragon...to your hand"), never itself
+  // negated, so it's threaded through as offerSk16Negation's `afterEither`,
+  // running whether the removal was negated or not.
   'Sk-03': {
     'b-remove': {
       needsChoice: true,
@@ -2795,28 +2924,38 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
           .filter((i): i is number => i !== null),
       resolve: (G, ctx, self, answer) => {
         if (typeof answer !== 'number') return;
-        removeFieldCard(G, ctx, self.pid, answer, 'ability');
-
-        const isWarDragon = (l: string) => CARD_BY_LABEL[l]?.name === 'WAR DRAGON';
-        const inRemoved = searchIndices(G, 'removed', self.pid, isWarDragon);
-        const zone: SearchZone = inRemoved.length > 0 ? 'removed' : 'deck';
-        dispatchSearch(
+        const removeSlot = answer;
+        offerSk16Negation(
           G,
           ctx,
-          self,
-          'Sk-03',
-          'b-warDragon',
-          zone,
           self.pid,
-          isWarDragon,
-          'Arrival of Doom: add your War Dragon to your hand.',
-          (G2, _ctx2, owner, realIndex) => {
-            if (zone === 'removed') {
-              const found = removeFromOwnRemovedPile(G2, owner, realIndex);
-              if (found) G2.secret.hands[owner].push(found);
-            } else {
-              moveDeckCardToHand(G2, owner, realIndex);
-            }
+          'action',
+          (G2, ctx2) => {
+            removeFieldCard(G2, ctx2, self.pid, removeSlot, 'ability');
+          },
+          (G2, ctx2) => {
+            const isWarDragon = (l: string) => CARD_BY_LABEL[l]?.name === 'WAR DRAGON';
+            const inRemoved = searchIndices(G2, 'removed', self.pid, isWarDragon);
+            const zone: SearchZone = inRemoved.length > 0 ? 'removed' : 'deck';
+            dispatchSearch(
+              G2,
+              ctx2,
+              self,
+              'Sk-03',
+              'b-warDragon',
+              zone,
+              self.pid,
+              isWarDragon,
+              'Arrival of Doom: add your War Dragon to your hand.',
+              (G3, _ctx3, owner, realIndex) => {
+                if (zone === 'removed') {
+                  const found = removeFromOwnRemovedPile(G3, owner, realIndex);
+                  if (found) G3.secret.hands[owner].push(found);
+                } else {
+                  moveDeckCardToHand(G3, owner, realIndex);
+                }
+              }
+            );
           }
         );
       },
@@ -3208,7 +3347,12 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
   },
 
   // Sk-05 DIVINE SKY STRIKE target step. Only reachable via the dispatcher in
-  // ABILITIES_BY_LABEL['Sk-05'] above.
+  // ABILITIES_BY_LABEL['Sk-05'] above. The removal itself is Sk-16d's own
+  // target ("your opponent's Action Card['s] remove 1 card from the
+  // field") — routed through offerSk16Negation rather than calling
+  // removeOpponentFieldCard directly, so War Dragon gets first say. No
+  // afterEither: this removal IS the entirety of Sk-05's own effect, unlike
+  // Sk-03b below.
   'Sk-05': {
     'a-target': {
       needsChoice: true,
@@ -3223,7 +3367,9 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
       resolve: (G, ctx, self, answer) => {
         if (typeof answer !== 'number') return;
         const opp = self.pid === '0' ? '1' : '0';
-        removeOpponentFieldCard(G, ctx, opp, answer);
+        offerSk16Negation(G, ctx, self.pid, 'action', (G2, ctx2) => {
+          removeOpponentFieldCard(G2, ctx2, opp, answer);
+        });
       },
     },
   },
@@ -3736,8 +3882,6 @@ export interface DeferredAbility {
 
 export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
-  { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },
-  { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },
   { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },
   { label: 'Sk-28', slot: 'c', classification: 'NOT_IMPLEMENTED', reason: 'Same missing infrastructure as slot b — and this branch is a turn-count timeout, not a draw event, so onDraw does not apply to it at all.' },
 ];
