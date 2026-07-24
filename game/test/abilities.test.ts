@@ -2772,3 +2772,134 @@ describe('Sk-26 ABDUCTION SAUCER (steal-and-hold, once per turn)', () => {
     expect(G().public.field['1'][0]?.label).toBe('Sk-16'); // player 1's own field is untouched — nothing returned there
   });
 });
+
+describe('Sk-18 EMPTY VESSEL (copy-identity)', () => {
+  test('114. copying a higher-BP removed card lets Sk-18 win a battle its own printed BP (1) would have lost', () => {
+    const { client, G } = createTestGame({
+      players: {
+        // Sk-16 WAR DRAGON, BP 9, sitting in the removed pile to be copied.
+        '0': { hand: ['Sk-18'], banished: ['Sk-16'], turnsTaken: 1 },
+        // Sk-17 BLOAT DRAGON, BP 3 — beats Sk-18's own printed BP 1, but
+        // loses to a copied BP 9.
+        '1': { field: ['Sk-17'] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-18 onto slot 0 — fires onSummon
+    client.moves.resolveChoice(true); // "copy a removed card?" — yes
+    client.moves.resolveChoice(0); // only candidate: Sk-16 at removed-pile index 0
+
+    expect(G().public.field['0'][0]?.copiedIdentity).toBe('Sk-16');
+    expect(G().public.field['0'][0]?.currentBp).toBe(9); // Sk-16's printed BP, not Sk-18's own (1)
+
+    client.moves.attackBattleCard(0, 0); // Sk-18 (BP9 via copy) attacks Sk-17 (BP3)
+
+    expect(G().public.field['1'][0]).toBeNull(); // Sk-17 removed
+    expect(G().public.banished['1']).toContain('Sk-17');
+    expect(G().public.field['0'][0]?.label).toBe('Sk-18'); // attacker survives — would NOT have, at printed BP 1
+  });
+
+  test('115. the copied card\'s own ability fires for Sk-18, through the exact same dispatch', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [{ label: 'Sk-18', copiedIdentity: 'Sk-26', currentBp: 1 }, null, null] },
+        '1': { field: ['Sk-20', null, null] },
+      },
+    });
+
+    client.moves.activateAbility(0); // dispatched via ABILITIES_BY_LABEL['Sk-26'] (Sk-26's own onActivate)
+    client.moves.resolveChoice(0); // Sk-20 is the only Battle Card on the opponent's field
+
+    expect(G().public.field['1'][0]).toBeNull(); // taken, exactly like a real Sk-26 would
+    expect(G().public.field['0'][0]?.attached).toEqual(['Sk-20']); // held under Sk-18's OWN slot
+    expect(G().public.field['0'][0]?.label).toBe('Sk-18'); // physical identity never changed
+  });
+
+  test('116. copying a card with a removal hook: the hook fires for the copy (Step 1d)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        // Sk-19 THE HEADLESS HORSEMAN, BP 5 as copied.
+        '0': { field: [{ label: 'Sk-18', copiedIdentity: 'Sk-19', currentBp: 5 }, null, null], turnsTaken: 1 },
+        '1': { field: ['Sk-16'] }, // BP 9 — beats the copied BP 5
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0); // Sk-18 (as Sk-19, BP5) attacks and would lose to BP9
+
+    // REMOVAL_HOOKS is consulted by effectiveLabel, so Sk-19's own hook
+    // opens — not a plain removal.
+    expect(G().public.pendingChoice?.sourceLabel).toBe('Sk-19');
+    expect(G().public.pendingChoice?.kind).toBe('yesNo');
+
+    client.moves.resolveChoice(true); // remain on the field instead (once only)
+
+    expect(G().public.field['0'][0]?.label).toBe('Sk-18'); // still physically Sk-18
+    expect(G().public.field['0'][0]?.replacementUsed).toBe(true);
+    expect(G().public.banished['0']).not.toContain('Sk-18');
+    expect(G().public.banished['0']).not.toContain('Sk-19');
+  });
+
+  test('117. Sk-18b does not fire while the copied removed card is still removed', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [{ label: 'Sk-18', copiedIdentity: 'Sk-16', currentBp: 9 }, null, null], banished: ['Sk-16'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.endTurn(); // turn.onEnd -> checkCopyIdentityIntegrity
+
+    expect(G().public.field['0'][0]?.label).toBe('Sk-18'); // untouched — Sk-16 is still in the removed pile
+    expect(G().public.banishedFaceDown['0']).toBe(0);
+  });
+
+  test('118. Sk-18b fires (face-down, no label revealed) once the copied removed card is no longer removed', () => {
+    const { client, G } = createTestGame({
+      players: {
+        // Sk-16 copied earlier, but is NOT in the removed pile any more —
+        // e.g. it was retrieved by some other effect since Sk-18 copied it.
+        '0': { field: [{ label: 'Sk-18', copiedIdentity: 'Sk-16', currentBp: 9 }, null, null], banished: [] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.endTurn(); // turn.onEnd -> checkCopyIdentityIntegrity
+
+    expect(G().public.field['0'][0]).toBeNull(); // removed
+    expect(G().public.banishedFaceDown['0']).toBe(1); // face-down: count only
+    expect(G().public.banished['0']).not.toContain('Sk-18'); // never revealed face-up
+    expect(G().public.banished['0']).not.toContain('Sk-16');
+  });
+
+  test('119. no eligible copy target (empty removed pile): resolves silently, Sk-18 stays its own printed self', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-18'], banished: [] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    expect(G().public.pendingChoice).toBeNull(); // the yesNo never opened — willHaveLegalOutcome's look-ahead
+    expect(G().public.field['0'][0]?.label).toBe('Sk-18');
+    expect(G().public.field['0'][0]?.currentBp).toBe(1); // printed BP, no copy applied
+    expect(G().public.field['0'][0]?.copiedIdentity).toBeUndefined();
+  });
+
+  test('120. copied identity is fully public: both clients see the same value (publicity, not secrecy)', () => {
+    const { G, G1 } = createTestGame({
+      players: {
+        '0': { field: [{ label: 'Sk-18', copiedIdentity: 'Sk-16', currentBp: 9 }, null, null] },
+        '1': { field: [] },
+      },
+    });
+
+    // FieldCard.copiedIdentity lives in G.public.field, exactly like
+    // currentBp/attached — no secrecy zone involved, matching Sk-18's text
+    // never saying the copy is hidden (contrast Sk-06's own secret
+    // scheduledSummons queue).
+    expect(G().public.field['0'][0]?.copiedIdentity).toBe('Sk-16');
+    expect(G1().public.field['0'][0]?.copiedIdentity).toBe('Sk-16');
+  });
+});

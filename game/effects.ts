@@ -249,6 +249,25 @@ export function modifyBp(fieldCard: FieldCard, delta: number): void {
   fieldCard.currentBp = Math.max(0, fieldCard.currentBp + delta);
 }
 
+/** The label whose ABILITIES_BY_LABEL / CHOICE_ABILITIES_BY_LABEL /
+ *  REMOVAL_HOOKS / GUARDIAN_HOOKS entry a field card currently resolves
+ *  through: its own printed `label`, unless Sk-18a's copy-identity effect
+ *  has set `copiedIdentity`, in which case every identity-DRIVEN lookup
+ *  (which ability fires, which hook protects it) uses the COPIED label
+ *  instead. This is the one place that decision is made — fireTrigger and
+ *  removeFieldCard both call this instead of reading `card.label` directly,
+ *  so a copy's abilities/hooks work through the exact same dispatch every
+ *  other card uses, with zero per-card special-casing anywhere else.
+ *  Deliberately NOT applied to physical-identity lookups (banished-pile
+ *  tracking, PLAY_GATES, singleton-deck name searches) — those must keep
+ *  reading `card.label` so the copying card is tracked as what it actually
+ *  is. PLAY_GATES specifically never needs this at all: gates are checked
+ *  only at play time, before Sk-18's onSummon copy effect has fired, so a
+ *  copy never retroactively changes what's needed to have played it. */
+export function effectiveLabel(card: FieldCard): string {
+  return card.copiedIdentity ?? card.label;
+}
+
 /** Inserts a card label into oppPid's deck at a given depth from the top
  *  (clamped to the deck's current length). Used by cards that plant
  *  themselves into the opponent's deck (Skullface) rather than being banished. */
@@ -1749,7 +1768,7 @@ const GUARDIAN_HOOKS: Record<string, GuardianHook> = {
   'Sk-29': {
     slot: 'a',
     guards: (_G, _pid, _guardianSlot, removedCard, _cause) =>
-      CARD_BY_LABEL[removedCard.label]?.type === 'battle' && removedCard.currentBp <= 4,
+      CARD_BY_LABEL[effectiveLabel(removedCard)]?.type === 'battle' && removedCard.currentBp <= 4,
     openPrompt: (G, ctx, pid, guardianSlot, removedSlot, cause, opts) => {
       const key = 'guard-confirm';
       (CHOICE_ABILITIES_BY_LABEL['Sk-29'] ??= {})[key] = {
@@ -1785,7 +1804,7 @@ const GUARDIAN_HOOKS: Record<string, GuardianHook> = {
   'Sk-30': {
     slot: 'a',
     guards: (G, pid, _guardianSlot, removedCard, _cause) =>
-      CARD_BY_LABEL[removedCard.label]?.name === 'SHADOW GHOST' && G.secret.hands[pid].length > 0,
+      CARD_BY_LABEL[effectiveLabel(removedCard)]?.name === 'SHADOW GHOST' && G.secret.hands[pid].length > 0,
     openPrompt: (G, ctx, pid, guardianSlot, removedSlot, cause, opts) => {
       const key = 'guard-confirm';
       (CHOICE_ABILITIES_BY_LABEL['Sk-30'] ??= {})[key] = {
@@ -2035,24 +2054,83 @@ const ATTACHED_CARDS_ON_REMOVAL: Record<
  *  "place it under this card" language implies it was consumed as an
  *  enhancement, not left to persist independently (nothing else in this
  *  engine has a card outlive the field slot it depends on). */
-function finalizeFieldRemoval(G: ShadowkhanG, ctx: EngineCtx, pid: string, slot: number, cause: RemovalCause): void {
+function finalizeFieldRemoval(
+  G: ShadowkhanG,
+  ctx: EngineCtx,
+  pid: string,
+  slot: number,
+  cause: RemovalCause,
+  /** true for Sk-18b's own removal (see removeFieldCardFaceDown) — banishes
+   *  face-down (count-only, no label revealed) instead of face-up, and skips
+   *  ATTACHED_CARDS_ON_REMOVAL (a face-down self-correction isn't the kind
+   *  of "removed by a card effect" Sk-26b's override text describes; no
+   *  currently-wireable card can have both an attach-target and a copied
+   *  identity anyway, but this keeps the branch honest either way). */
+  faceDown = false
+): void {
   const card = G.public.field[pid][slot];
   if (!card) return;
-  G.public.banished[pid].push(card.label);
-  G.public.banishedFromField[pid].push(card.label);
+  if (faceDown) {
+    G.public.banishedFaceDown[pid]++;
+  } else {
+    G.public.banished[pid].push(card.label);
+    G.public.banishedFromField[pid].push(card.label);
+  }
 
   const attachedLabels = card.attached;
-  const handled = ATTACHED_CARDS_ON_REMOVAL[card.label]?.(G, ctx, pid, cause, attachedLabels) ?? false;
+  const handled = !faceDown && (ATTACHED_CARDS_ON_REMOVAL[card.label]?.(G, ctx, pid, cause, attachedLabels) ?? false);
   if (!handled) {
     for (const attachedLabel of attachedLabels) {
-      G.public.banished[pid].push(attachedLabel);
-      G.public.banishedFromField[pid].push(attachedLabel);
+      if (faceDown) {
+        G.public.banishedFaceDown[pid]++;
+      } else {
+        G.public.banished[pid].push(attachedLabel);
+        G.public.banishedFromField[pid].push(attachedLabel);
+      }
     }
   }
 
   G.public.field[pid][slot] = null;
   expireEffectsForSlot(G, pid, slot);
   expireScheduledSummonsForSlot(G, pid, slot);
+}
+
+/** Sk-18b: "If the selected removed card is no longer removed, remove this
+ *  card face-down." The removal itself: unconditional, bypasses
+ *  REMOVAL_HOOKS/GUARDIAN_HOOKS entirely — same precedent as
+ *  banishHandCardFaceDown/removeOwnDeckTopFaceDown, which also skip the
+ *  hook pipeline for a face-down removal. This isn't a battle loss or an
+ *  opposing card's effect targeting Sk-18 (neither RemovalCause value
+ *  describes "the thing I copied stopped being in the removed pile"); it's
+ *  a self-correcting state-integrity rule, so it isn't something Sk-18's own
+ *  (or a copied) removal-replacement/protection should be able to answer. */
+function removeFieldCardFaceDown(G: ShadowkhanG, ctx: EngineCtx, pid: string, slot: number): void {
+  finalizeFieldRemoval(G, ctx, pid, slot, 'ability', true);
+}
+
+/** Sk-18b's own condition check, run once per turn boundary (turn.onEnd —
+ *  see expireTimedEffects, the same periodic-sweep shape) rather than
+ *  hooked into every individual place a label can leave a removed pile.
+ *  That set is not one choke point: removeFromOwnRemovedPile,
+ *  removeMultipleFromOwnRemovedPile, AND Sk-26a's own direct splice (moving
+ *  a just-banished card into `attached`) all mutate G.public.banished
+ *  independently, and hooking all three (plus any future one) would be
+ *  exactly the per-case special-casing this codebase avoids elsewhere. The
+ *  printed text states a condition to check, not an event to react to
+ *  instantly, so a once-per-turn sweep is faithful to the text and far more
+ *  robust. Scans BOTH players every call, not just ctx.currentPlayer's own
+ *  side: Sk-26a can redirect a card out of ITS TARGET's removed pile, which
+ *  may belong to either player relative to whoever's turn is ending. */
+export function checkCopyIdentityIntegrity(G: ShadowkhanG, ctx: EngineCtx): void {
+  for (const pid of Object.keys(G.public.field)) {
+    const field = G.public.field[pid];
+    for (let slot = 0; slot < field.length; slot++) {
+      const card = field[slot];
+      if (card?.copiedIdentity && !G.public.banished[pid].includes(card.copiedIdentity)) {
+        removeFieldCardFaceDown(G, ctx, pid, slot);
+      }
+    }
+  }
 }
 
 /** Fires onRemoved (if requested, while the card is still field-resident),
@@ -2138,7 +2216,7 @@ export function removeFieldCard(
     return 'prevented';
   }
 
-  const hook = REMOVAL_HOOKS[card.label];
+  const hook = REMOVAL_HOOKS[effectiveLabel(card)];
   if (hook && hook.eligible(G, pid, card, cause)) {
     hook.openPrompt(G, ctx, pid, slot, cause, opts);
     return 'pending';
@@ -2149,7 +2227,7 @@ export function removeFieldCard(
     if (guardianSlot === slot) continue;
     const guardianCard = field[guardianSlot];
     if (!guardianCard) continue;
-    const guardianHook = GUARDIAN_HOOKS[guardianCard.label];
+    const guardianHook = GUARDIAN_HOOKS[effectiveLabel(guardianCard)];
     if (guardianHook && guardianHook.guards(G, pid, guardianSlot, card, cause)) {
       guardianHook.openPrompt(G, ctx, pid, guardianSlot, slot, cause, opts);
       return 'pending';
@@ -2719,6 +2797,57 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
     },
   },
 
+  // Sk-18 EMPTY VESSEL, effect a: "When you play this card, you may select
+  // 1 of your removed cards. This card's BP and effects become identical to
+  // the selected card." Optional even when eligible removed cards exist
+  // ("you may"), so this is the same yesNo -> leadsTo target shape as Sk-14
+  // above, not a bare dispatchSearch (which would force a pick the instant
+  // exactly one candidate exists, with no way to decline). The zero-target
+  // gate still applies via willHaveLegalOutcome's leadsTo look-ahead: an
+  // empty removed pile means the yesNo itself never opens — "no eligible
+  // copy target: resolves silently" falls out of the existing mechanism,
+  // no special-casing needed.
+  //
+  // 'removed' is already fully public (see zoneIsSecret) so, like every
+  // other 'removed'-zone selection in this file, the target step's options
+  // are real indices directly, no ordinal indirection.
+  //
+  // The copy itself: sets FieldCard.copiedIdentity (see effectiveLabel) and
+  // assigns currentBp from the selected card's PRINTED bp — the selected
+  // card is removed, not field-resident, so there's no "live" BP to copy,
+  // only its printed value, same as every other "become/summon a copy of
+  // label X" pattern in this file (e.g. Sk-06a's selectedBp).
+  'Sk-18': {
+    a: {
+      needsChoice: true,
+      trigger: 'onSummon',
+      leadsTo: 'a-target',
+      prompt: 'Empty Vessel: copy the BP and effects of one of your removed cards?',
+      kind: 'yesNo',
+      getOptions: () => null,
+      resolve: (G, ctx, self, answer) => {
+        if (answer !== true) return;
+        openChoice(G, ctx, self, 'Sk-18', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-18']['a-target']);
+      },
+    },
+    'a-target': {
+      needsChoice: true,
+      prompt: 'Choose which of your removed cards to copy.',
+      kind: 'chooseAbility',
+      getOptions: (G, _ctx, self) => G.public.banished[self.pid].map((_l, i) => i),
+      resolve: (G, _ctx, self, answer) => {
+        if (typeof answer !== 'number') return;
+        const pile = G.public.banished[self.pid];
+        const selectedLabel = pile[answer];
+        if (selectedLabel === undefined) return;
+        const card = G.public.field[self.pid][self.slot];
+        if (!card) return;
+        card.copiedIdentity = selectedLabel;
+        card.currentBp = CARD_BY_LABEL[selectedLabel]?.bp ?? 0;
+      },
+    },
+  },
+
   // Sk-13 MYSTICAL BLUE FLAME POWER CARD: "Choose one of the following
   // effects when activated: [0] Increase the BP of one of your Battle Cards
   // by +1 ... / [1] Restore the BP of one of your Battle Cards to its
@@ -3138,8 +3267,9 @@ export function fireTrigger(
 ): void {
   const fieldCard = G.public.field[self.pid][self.slot];
   if (!fieldCard) return;
+  const label = effectiveLabel(fieldCard);
 
-  const abilities = ABILITIES_BY_LABEL[fieldCard.label];
+  const abilities = ABILITIES_BY_LABEL[label];
   if (abilities) {
     for (const ability of abilities) {
       if (ability.auto && ability.trigger === trigger) {
@@ -3149,12 +3279,12 @@ export function fireTrigger(
   }
 
   if (!G.public.pendingChoice) {
-    const choices = CHOICE_ABILITIES_BY_LABEL[fieldCard.label];
+    const choices = CHOICE_ABILITIES_BY_LABEL[label];
     if (choices) {
       for (const [key, choice] of Object.entries(choices)) {
         if (choice.trigger === trigger) {
-          if (willHaveLegalOutcome(G, ctx, self, fieldCard.label, choice)) {
-            openChoice(G, ctx, self, fieldCard.label, key, choice);
+          if (willHaveLegalOutcome(G, ctx, self, label, choice)) {
+            openChoice(G, ctx, self, label, key, choice);
           }
           break;
         }
@@ -3382,8 +3512,6 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
   { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },
   { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },
-  { label: 'Sk-18', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The 'select 1 of your removed cards' pick is now searchable (zone: 'removed'), but the effect isn't a search-and-move — it's a copy-identity mechanic ('this card's BP and effects become identical to the selected card'), which has no representation in FieldCard at all (no notion of a card impersonating another card's label/BP/ability set). The zone gap being solved doesn't touch this." },
-  { label: 'Sk-18', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-18a's copy-identity selection, which is still blocked — see Sk-18a." },
   { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'shuffle them face-down, flip the top card face-up, and if you call it correctly...' — the randomness half (EngineCtx/random.Shuffle, wired for Sk-07a this pass) is no longer the blocker. What's still missing is the guessing interaction itself: a way for the player to submit a guess BEFORE the flip, and a PendingChoiceKind/resolve shape that reveals the flipped card and compares it to that guess — none of which exists. Deliberately not attempted this pass (out of scope: needs a guessing interaction beyond randomness, not just a shuffle)." },
   { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome, which is itself still blocked — see Sk-21a." },
   { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },

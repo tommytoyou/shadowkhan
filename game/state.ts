@@ -21,6 +21,22 @@ export interface FieldCard {
   /** true once this card has used up a one-time removal-replacement effect
    *  (e.g. The Headless Horseman's "once, remain on the field instead"). */
   replacementUsed?: boolean;
+  /** Sk-18 EMPTY VESSEL: "This card's BP and effects become identical to the
+   *  selected card." Label of the removed card this one is currently
+   *  impersonating, or undefined if it hasn't copied anything (or is any
+   *  other card). Deliberately NOT represented by overwriting `label` —
+   *  `label` is this card's own physical identity, read by every
+   *  label-keyed banished/removal/search mechanism (finalizeFieldRemoval,
+   *  banishedFromField, PLAY_GATES, singleton-deck name searches like
+   *  Sk-03b/Sk-20b); mutating it would make the card vanish from its own
+   *  identity's tracking the moment it copies anything. See effectiveLabel
+   *  in effects.ts — the one place that decides which label a field card's
+   *  ABILITIES_BY_LABEL/CHOICE_ABILITIES_BY_LABEL/REMOVAL_HOOKS/GUARDIAN_HOOKS
+   *  lookup uses, consulting this field instead of `label` when set. BP is
+   *  copied by value into `currentBp` at selection time (the same field
+   *  every other card's live BP already lives in), so battle comparisons
+   *  need no special-casing at all. */
+  copiedIdentity?: string;
 }
 
 export type PendingChoiceKind =

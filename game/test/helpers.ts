@@ -22,7 +22,7 @@ export type PlayerID = '0' | '1';
  *  without needing to re-derive the whole attach/steal chain in every test. */
 export type FieldSlotSpec =
   | string
-  | (Partial<Pick<FieldCard, 'currentBp' | 'canAttack' | 'protectedFromBattleCardRemoval' | 'turnsOnField' | 'replacementUsed' | 'attached'>> & {
+  | (Partial<Pick<FieldCard, 'currentBp' | 'canAttack' | 'protectedFromBattleCardRemoval' | 'turnsOnField' | 'replacementUsed' | 'attached' | 'copiedIdentity'>> & {
       label: string;
     })
   | null;
@@ -98,6 +98,9 @@ function toFieldCard(spec: FieldSlotSpec): FieldCard | null {
   }
   if (isObj && spec.replacementUsed !== undefined) {
     card.replacementUsed = spec.replacementUsed;
+  }
+  if (isObj && spec.copiedIdentity !== undefined) {
+    card.copiedIdentity = spec.copiedIdentity;
   }
   return card;
 }

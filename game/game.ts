@@ -22,6 +22,8 @@ import {
   getAttachTarget,
   attachCardToHost,
   isRepeatableActivation,
+  checkCopyIdentityIntegrity,
+  effectiveLabel,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -130,13 +132,14 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       }
     },
 
-    onEnd: ({ G, ctx }) => {
+    onEnd: ({ G, ctx, random, events }) => {
       const pid = ctx.currentPlayer;
       G.public.turnsTaken[pid] = (G.public.turnsTaken[pid] ?? 0) + 1;
       for (const card of G.public.field[pid]) {
         if (card) card.turnsOnField += 1;
       }
       expireTimedEffects(G);
+      checkCopyIdentityIntegrity(G, { ctx, random, events });
     },
   },
 
@@ -373,7 +376,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         const card = G.public.field[pid][cardFieldIndex];
         if (!card) return INVALID_MOVE;
-        const repeatable = isRepeatableActivation(card.label);
+        const repeatable = isRepeatableActivation(effectiveLabel(card));
         if (!repeatable && card.activated) return INVALID_MOVE;
         if (hasActiveEffect(G, pid, cardFieldIndex, 'cannotUseEffects')) return INVALID_MOVE;
 
