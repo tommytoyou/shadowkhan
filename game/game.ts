@@ -5,15 +5,12 @@ import type { ShadowkhanG } from './state';
 import { syncCounts } from './state';
 import {
   fireTrigger,
-  modifyBp,
   interceptHandOrDeckAttack,
   resolvePendingChoice,
   drawCardForPlayer,
   isPlayLegal,
-  removeFieldCard,
   removeFromOpponentHand,
   removeOpponentDeckTop,
-  removeOwnDeckTopFaceDown,
   discardOwnHandCard,
   hasActiveEffect,
   expireTimedEffects,
@@ -24,6 +21,8 @@ import {
   isRepeatableActivation,
   checkCopyIdentityIntegrity,
   effectiveLabel,
+  offerSk21Gambit,
+  resolveBattleOutcome,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -60,6 +59,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         decks: { '0': deck0, '1': deck1 },
         hands: { '0': hand0, '1': hand1 },
         scheduledSummons: { '0': [], '1': [] },
+        pendingFlip: { '0': null, '1': null },
       },
       public: {
         deckCounts: { '0': 0, '1': 0 },
@@ -84,7 +84,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
   playerView: ({ G, playerID }) => {
     if (playerID === null || playerID === undefined) {
-      return { ...G, secret: { decks: {}, hands: {}, scheduledSummons: {} } };
+      return { ...G, secret: { decks: {}, hands: {}, scheduledSummons: {}, pendingFlip: {} } };
     }
     return {
       ...G,
@@ -92,6 +92,9 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         decks: { [playerID]: G.secret.decks[playerID] ?? [] },
         hands: { [playerID]: G.secret.hands[playerID] ?? [] },
         scheduledSummons: { [playerID]: G.secret.scheduledSummons[playerID] ?? [] },
+        // Never exposed to any client, including its own owner — see
+        // SecretState.pendingFlip.
+        pendingFlip: {},
       },
     };
   },
@@ -214,29 +217,17 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         // card is unbanishable in an ordinary BP battle. The flag only
         // blocks ability-driven ('ability'-cause) removal — enforced inside
         // removeFieldCard itself, not at this call site.
-        if (attacker.currentBp > defender.currentBp) {
-          removeFieldCard(G, engineCtx, opp, theirSlot, 'battle', {
-            fireOnRemoved: true,
-            afterRemoved: (G2, ctx2) => fireTrigger(G2, ctx2, 'onBattleWin', { pid, slot: mySlot }),
-          });
-        } else if (attacker.currentBp < defender.currentBp) {
-          if (G.public.rulesOfEngagementActive) {
-            // RULES OF ENGAGEMENT (Sk-01): attacking a higher-BP card reduces
-            // the defender's BP by the attacker's BP instead of removing the
-            // attacker; the defender is only removed once its BP hits zero.
-            modifyBp(defender, -attacker.currentBp);
-            if (defender.currentBp <= 0) {
-              removeFieldCard(G, engineCtx, opp, theirSlot, 'battle', { fireOnRemoved: true });
-            }
-          } else {
-            removeFieldCard(G, engineCtx, pid, mySlot, 'battle', { fireOnRemoved: true });
-          }
-        } else {
-          // Shockwave: both lose top deck card face-down
-          removeOwnDeckTopFaceDown(G, pid);
-          removeOwnDeckTopFaceDown(G, opp);
-          syncCounts(G);
-        }
+        //
+        // Sk-21a (SAND SQUID) needs to PAUSE this combat resolution itself
+        // (a "you may shuffle and guess" step ahead of the normal BP
+        // comparison, possibly removing the defender entirely before that
+        // comparison would even matter) — see offerSk21Gambit in effects.ts.
+        // For every other attacker it returns false immediately and normal
+        // resolution proceeds exactly as before, via the shared
+        // resolveBattleOutcome (the same BP-comparison logic that used to
+        // live inline here).
+        if (offerSk21Gambit(G, engineCtx, pid, mySlot, opp, theirSlot)) return;
+        resolveBattleOutcome(G, engineCtx, pid, mySlot, opp, theirSlot);
       },
     },
 

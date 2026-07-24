@@ -2238,6 +2238,232 @@ export function removeFieldCard(
   return 'removed';
 }
 
+/**
+ * The ordinary BP-comparison combat resolution attackBattleCard has always
+ * run — factored out here (rather than left inline in game.ts) so Sk-21a's
+ * gambit (below) can re-invoke the SAME normal-combat logic once its own
+ * shuffle-guess resolves, without duplicating it. Exported for game.ts's
+ * attackBattleCard move to call directly for every OTHER attacker.
+ *
+ * Safe to call even if the original attacker or defender is already gone
+ * (e.g. a correct Sk-21a guess just removed the defender, along with the
+ * rest of the opponent's field) — it simply no-ops, since there is no
+ * meaningful "attack" left to resolve.
+ */
+export function resolveBattleOutcome(
+  G: ShadowkhanG,
+  ctx: EngineCtx,
+  pid: string,
+  mySlot: number,
+  opp: string,
+  theirSlot: number
+): void {
+  const attacker = G.public.field[pid][mySlot];
+  const defender = G.public.field[opp][theirSlot];
+  if (!attacker || !defender) return;
+
+  if (attacker.currentBp > defender.currentBp) {
+    removeFieldCard(G, ctx, opp, theirSlot, 'battle', {
+      fireOnRemoved: true,
+      afterRemoved: (G2, ctx2) => fireTrigger(G2, ctx2, 'onBattleWin', { pid, slot: mySlot }),
+    });
+  } else if (attacker.currentBp < defender.currentBp) {
+    if (G.public.rulesOfEngagementActive) {
+      // RULES OF ENGAGEMENT (Sk-01): attacking a higher-BP card reduces the
+      // defender's BP by the attacker's BP instead of removing the
+      // attacker; the defender is only removed once its BP hits zero.
+      modifyBp(defender, -attacker.currentBp);
+      if (defender.currentBp <= 0) {
+        removeFieldCard(G, ctx, opp, theirSlot, 'battle', { fireOnRemoved: true });
+      }
+    } else {
+      removeFieldCard(G, ctx, pid, mySlot, 'battle', { fireOnRemoved: true });
+    }
+  } else {
+    // Shockwave: both lose top deck card face-down
+    removeOwnDeckTopFaceDown(G, pid);
+    removeOwnDeckTopFaceDown(G, opp);
+    syncCounts(G);
+  }
+}
+
+/** Recursively removes each of `remainingSlots` from opp's field, ability-
+ *  caused, routing every single one through removeFieldCard so protection,
+ *  self-hooks and guardians all get their normal say — no bulk-removal
+ *  shortcut that would bypass them. Continues to the next slot once the
+ *  current one's fate is fully settled: immediately for a synchronous
+ *  'removed' (via afterRemoved, which finishFieldRemoval always invokes
+ *  before returning) or 'prevented' result, or — for a 'pending' result — only
+ *  if the hook/guardian's OWN choice ends with the card actually being
+ *  removed (afterRemoved fires from THAT resolution too, since hooks/
+ *  guardians preserve `opts` through their decline branch). If a card's own
+ *  replacement hook is instead ACCEPTED (it stays on the field, e.g. The
+ *  Headless Horseman "remain instead"), afterRemoved never fires for it by
+ *  design (RemovalOpts.afterRemoved's own contract: "never on prevent/
+ *  redirect") — so this sweep deliberately STOPS at that card rather than
+ *  skipping past it to remove the rest. Sk-21a's text never addresses a
+ *  targeted card that explicitly declines its own removal via a printed
+ *  replacement effect; stopping there is the more conservative reading,
+ *  since it doesn't silently bypass that card's own stated protection just
+ *  to keep the sweep going. `whenDone` fires once the whole sweep has
+ *  settled (empty list, including immediately if `remainingSlots` starts
+ *  empty) — carries Sk-21a's own continuation into normal combat resolution. */
+function removeAllAbilityTargets(
+  G: ShadowkhanG,
+  ctx: EngineCtx,
+  opp: string,
+  remainingSlots: number[],
+  whenDone: (G: ShadowkhanG, ctx: EngineCtx) => void
+): void {
+  if (remainingSlots.length === 0) {
+    whenDone(G, ctx);
+    return;
+  }
+  const [slot, ...rest] = remainingSlots;
+  const card = G.public.field[opp][slot];
+  if (!card) {
+    removeAllAbilityTargets(G, ctx, opp, rest, whenDone);
+    return;
+  }
+  const result = removeFieldCard(G, ctx, opp, slot, 'ability', {
+    afterRemoved: (G2, ctx2) => removeAllAbilityTargets(G2, ctx2, opp, rest, whenDone),
+  });
+  if (result === 'prevented') {
+    removeAllAbilityTargets(G, ctx, opp, rest, whenDone);
+  }
+  // 'pending': see doc comment — continuation depends on the hook/guardian's
+  // own outcome, not decided here.
+}
+
+/**
+ * Sk-21 SAND SQUID, effect a: "When this card battles, you may select all
+ * Battle Cards on your opponent's field and shuffle them face-down. Flip the
+ * top card face-up, and if you call it correctly, remove all cards on your
+ * opponent's field." Effect b: "If your guess is incorrect, decrease this
+ * card's BP by 2."
+ *
+ * Hooked directly into attackBattleCard (as the ATTACKER only — "your
+ * opponent's field" reads from the attacking player's own perspective, and
+ * nothing in the text describes a defensive/being-attacked version) rather
+ * than through fireTrigger's generic dispatch: this is the only ability in
+ * the card set that needs to PAUSE the shared combat resolution itself
+ * (not just react before/after it), and fireTrigger's AbilitySelf carries no
+ * way to thread `opp`/`theirSlot` through a later, separate resolveChoice
+ * dispatch — so this is called directly from game.ts's attackBattleCard,
+ * closing over pid/mySlot/opp/theirSlot as plain primitives (safe to close
+ * over across a later, separate move dispatch — unlike G/ctx, which are
+ * never captured here for that reason).
+ *
+ * "Shuffle them face-down" is implemented as a single hidden random draw
+ * (ctx.random.Shuffle(candidateLabels)[0]) rather than a persisted, fully
+ * shuffled array: "shuffle N cards and flip the top one" and "draw 1 of N
+ * uniformly at random" are the same distribution, so this is an
+ * implementation simplification, not an approximation of the rules outcome.
+ * The field's own real card identities are never actually hidden from
+ * G.public.field during this — nothing else in this engine has a concept of
+ * an "unknown" field card, and inventing one wasn't needed for the same
+ * observable behavior: the specific draw stays unknown to BOTH players
+ * (matching this codebase's other face-down precedent — banishedFaceDown
+ * never records a label for anyone either) until it's compared against the
+ * guess, which is the only part of "face-down" that actually matters
+ * mechanically. The guess's own pendingChoice therefore offers real,
+ * already-public field slots as its options (kind: 'opponentField', the
+ * existing shape) — nothing new is leaked, since the guesser already knew
+ * the candidate set beforehand (the field is always public); only the
+ * SPECIFIC draw is hidden, and that never appears in pendingChoice at all.
+ *
+ * The hidden draw lives in G.secret.pendingFlip, keyed by the guesser's own
+ * pid — the one field in this codebase playerView never exposes to ANY
+ * playerID, not even its own owner (see SecretState.pendingFlip and
+ * playerView in game.ts), because the guesser specifically must not see
+ * their own outcome before committing a guess.
+ *
+ * The flipped card's identity is never separately exposed as its own piece
+ * of revealed state on a WRONG guess — only the ability's actual outcome is
+ * public (a removal on success, Sk-21's own BP-2 on failure), both already
+ * visible through ordinary G.public state. No rule depends on either player
+ * knowing specifically which card was drawn once the guess is known to be
+ * wrong, so this deliberately doesn't invent a new "reveal without removing"
+ * concept for it.
+ *
+ * Returns true if the gambit was offered (a pendingChoice is now open —
+ * caller must not also run normal combat resolution this dispatch) or false
+ * if there was nothing to offer (attacker isn't Sk-21, or the opponent's
+ * field has no Battle Cards — the zero-target gate), so the caller should
+ * proceed straight to resolveBattleOutcome instead. Normal combat resolution
+ * is always attempted again at the very end of every branch (decline,
+ * correct guess, wrong guess) via resolveBattleOutcome — safe even when the
+ * original defender is already gone.
+ */
+export function offerSk21Gambit(
+  G: ShadowkhanG,
+  ctx: EngineCtx,
+  pid: string,
+  mySlot: number,
+  opp: string,
+  theirSlot: number
+): boolean {
+  const attacker = G.public.field[pid][mySlot];
+  if (!attacker || effectiveLabel(attacker) !== 'Sk-21') return false;
+
+  const candidateSlots = (G2: ShadowkhanG): number[] =>
+    G2.public.field[opp]
+      .map((c, i) => (c && CARD_BY_LABEL[effectiveLabel(c)]?.type === 'battle' ? i : null))
+      .filter((i): i is number => i !== null);
+
+  if (candidateSlots(G).length === 0) return false;
+
+  const confirmKey = 'a-confirm';
+  const confirmChoice: ChoiceAbility = {
+    needsChoice: true,
+    prompt: "Sand Squid: shuffle all of your opponent's Battle Cards face-down and call the top card?",
+    kind: 'yesNo',
+    getOptions: () => null,
+    resolve: (G2, ctx2, _self2, answer) => {
+      const candidates = answer === true ? candidateSlots(G2) : [];
+      if (answer !== true || candidates.length === 0) {
+        resolveBattleOutcome(G2, ctx2, pid, mySlot, opp, theirSlot);
+        return;
+      }
+
+      const labels = candidates.map((slot) => G2.public.field[opp][slot]!.label);
+      const [flipped] = ctx2.random.Shuffle(labels);
+      G2.secret.pendingFlip[pid] = flipped;
+
+      const guessKey = 'a-guess';
+      const guessChoice: ChoiceAbility = {
+        needsChoice: true,
+        prompt: "Call which of your opponent's Battle Cards will be flipped face-up.",
+        kind: 'opponentField',
+        getOptions: (G3) => candidateSlots(G3),
+        resolve: (G3, ctx3, _self3, guessAnswer) => {
+          const flippedLabel = G3.secret.pendingFlip[pid] ?? null;
+          G3.secret.pendingFlip[pid] = null;
+
+          const guessedLabel =
+            typeof guessAnswer === 'number' ? G3.public.field[opp][guessAnswer]?.label : undefined;
+
+          if (guessedLabel !== undefined && flippedLabel !== null && guessedLabel === flippedLabel) {
+            removeAllAbilityTargets(G3, ctx3, opp, candidateSlots(G3), (G4, ctx4) =>
+              resolveBattleOutcome(G4, ctx4, pid, mySlot, opp, theirSlot)
+            );
+            return;
+          }
+
+          const self = G3.public.field[pid][mySlot];
+          if (self) modifyBp(self, -2);
+          resolveBattleOutcome(G3, ctx3, pid, mySlot, opp, theirSlot);
+        },
+      };
+      (CHOICE_ABILITIES_BY_LABEL['Sk-21'] ??= {})[guessKey] = guessChoice;
+      openChoice(G2, ctx2, { pid, slot: mySlot }, 'Sk-21', guessKey, guessChoice);
+    },
+  };
+  (CHOICE_ABILITIES_BY_LABEL['Sk-21'] ??= {})[confirmKey] = confirmChoice;
+  openChoice(G, ctx, { pid, slot: mySlot }, 'Sk-21', confirmKey, confirmChoice);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Named/attribute card search primitive. A single reusable engine for every
 // ability whose effect text is "find a card by name/type/BP/tier in a hand,
@@ -3512,8 +3738,6 @@ export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
   { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },
   { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },
-  { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'shuffle them face-down, flip the top card face-up, and if you call it correctly...' — the randomness half (EngineCtx/random.Shuffle, wired for Sk-07a this pass) is no longer the blocker. What's still missing is the guessing interaction itself: a way for the player to submit a guess BEFORE the flip, and a PendingChoiceKind/resolve shape that reveals the flipped card and compares it to that guess — none of which exists. Deliberately not attempted this pass (out of scope: needs a guessing interaction beyond randomness, not just a shuffle)." },
-  { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome, which is itself still blocked — see Sk-21a." },
   { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },
   { label: 'Sk-28', slot: 'c', classification: 'NOT_IMPLEMENTED', reason: 'Same missing infrastructure as slot b — and this branch is a turn-count timeout, not a draw event, so onDraw does not apply to it at all.' },
 ];

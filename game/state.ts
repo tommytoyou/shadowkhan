@@ -180,6 +180,16 @@ export interface SecretState {
   hands: Record<string, string[]>;
   /** See ScheduledSummon. Keyed by owner, same shape as decks/hands. */
   scheduledSummons: Record<string, ScheduledSummon[]>;
+  /** Sk-21a SAND SQUID: "shuffle [opponent's Battle Cards] face-down. Flip
+   *  the top card face-up, and if you call it correctly..." — the hidden
+   *  result of that flip, keyed by the GUESSER's own pid, set the instant
+   *  the shuffle happens and cleared the instant the guess is answered.
+   *  Deliberately never exposed through playerView for ANY playerID, not
+   *  even its own owner (see playerView in game.ts) — the guesser must not
+   *  be able to see their own outcome before committing a guess. The only
+   *  field in this codebase with that property; every other SecretState
+   *  field is visible to its own owner. */
+  pendingFlip: Record<string, string | null>;
 }
 
 export interface PublicState {

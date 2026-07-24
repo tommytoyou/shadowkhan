@@ -55,6 +55,11 @@ export interface PlayerPositionSpec {
    *  turn.onBegin resolution path (field full, source already gone) without
    *  re-deriving Sk-06's own selection+cost chain each time. */
   scheduledSummons?: ScheduledSummon[];
+  /** G.secret.pendingFlip (see its doc comment in state.ts) for this player.
+   *  Defaults to null. Seedable so a test can exercise the guess-resolution
+   *  step (resolveChoice against Sk-21a's own 'a-guess' entry) in isolation,
+   *  without depending on the RNG draw that would normally populate it. */
+  pendingFlip?: string | null;
 }
 
 export interface BoardPositionSpec {
@@ -126,6 +131,7 @@ function buildG(spec: BoardPositionSpec): ShadowkhanG {
       decks: { '0': [...deck0], '1': [...deck1] },
       hands: { '0': [...hand0], '1': [...hand1] },
       scheduledSummons: { '0': [...(p0.scheduledSummons ?? [])], '1': [...(p1.scheduledSummons ?? [])] },
+      pendingFlip: { '0': p0.pendingFlip ?? null, '1': p1.pendingFlip ?? null },
     },
     public: {
       deckCounts: { '0': deck0.length, '1': deck1.length },

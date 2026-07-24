@@ -2903,3 +2903,152 @@ describe('Sk-18 EMPTY VESSEL (copy-identity)', () => {
     expect(G1().public.field['0'][0]?.copiedIdentity).toBe('Sk-16');
   });
 });
+
+describe('Sk-21 SAND SQUID (shuffle-and-guess)', () => {
+  // Seeds and field compositions below were found by direct observation
+  // (running each seed against both possible guess indices and reading the
+  // outcome) — ctx.random.Shuffle's output for a given seed/input isn't
+  // meant to be predicted by inspection, only reproduced.
+
+  test('121. a correct guess (known seed) removes all of the opponent\'s Battle Cards', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21'], turnsTaken: 1 },
+        '1': { field: ['Sk-20', 'Sk-17'] },
+      },
+      seed: 'sk21-wrongguess-seed',
+    });
+
+    client.moves.attackBattleCard(0, 0);
+    expect(G().public.pendingChoice?.kind).toBe('yesNo');
+    client.moves.resolveChoice(true);
+    expect(G().public.pendingChoice?.kind).toBe('opponentField');
+    client.moves.resolveChoice(0); // correct, for this seed
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1']).toEqual([null, null, null]);
+    expect(G().public.banished['1']).toEqual(expect.arrayContaining(['Sk-20', 'Sk-17']));
+    expect(G().public.field['0'][0]?.currentBp).toBe(6); // Sk-21's own BP untouched by a correct guess
+  });
+
+  test('122. a wrong guess decreases Sk-21\'s own BP by 2, permanently, and normal combat still follows', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21'], turnsTaken: 1 },
+        '1': { field: ['Sk-20', 'Sk-17'] }, // Sk-20 (BP2) is the declared attack target
+      },
+      seed: 'sk21-wrongguess-seed',
+    });
+
+    client.moves.attackBattleCard(0, 0);
+    client.moves.resolveChoice(true);
+    client.moves.resolveChoice(1); // wrong, for this seed
+
+    expect(G().public.field['0'][0]?.currentBp).toBe(4); // 6 - 2, permanent (no ActiveEffect, no expiry)
+    // Normal combat still resolves afterward against the ORIGINAL declared
+    // target (Sk-20, slot 0) using the now-reduced BP: 4 > 2, so Sk-20 is
+    // still removed — but via the ordinary battle-cause path, not Sk-21a's
+    // own "remove all" sweep (which never fires on a wrong guess at all).
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-20');
+    // Sk-17 was never the declared target and the sweep never ran — untouched.
+    expect(G().public.field['1'][1]?.label).toBe('Sk-17');
+  });
+
+  test('123. the same seed produces the same shuffle result twice (reproducibility)', () => {
+    const setup = {
+      players: {
+        '0': { field: ['Sk-21'], turnsTaken: 1 },
+        '1': { field: ['Sk-20', 'Sk-17'] },
+      },
+      seed: 'sk21-wrongguess-seed',
+    };
+
+    const run1 = createTestGame(setup);
+    run1.client.moves.attackBattleCard(0, 0);
+    run1.client.moves.resolveChoice(true);
+    run1.client.moves.resolveChoice(0);
+
+    const run2 = createTestGame(setup);
+    run2.client.moves.attackBattleCard(0, 0);
+    run2.client.moves.resolveChoice(true);
+    run2.client.moves.resolveChoice(0);
+
+    expect(run1.G().public.field['1']).toEqual(run2.G().public.field['1']);
+    expect(run1.G().public.field['0'][0]?.currentBp).toEqual(run2.G().public.field['0'][0]?.currentBp);
+    expect(run1.G().public.banished['1']).toEqual(run2.G().public.banished['1']);
+  });
+
+  test('124. a protected opponent card is not removed by a correct guess, even though the rest of the field is', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21'], turnsTaken: 1 },
+        // Sk-17 (unprotected) is the declared attack target; Sk-20 carries
+        // protectedFromBattleCardRemoval, which only blocks cause: 'ability'
+        // removal — exactly what the "remove all" sweep uses.
+        '1': { field: ['Sk-17', { label: 'Sk-20', protectedFromBattleCardRemoval: true }] },
+      },
+      seed: 'sk21-protected-seed',
+    });
+
+    client.moves.attackBattleCard(0, 0);
+    client.moves.resolveChoice(true);
+    client.moves.resolveChoice(1); // correct, for this seed
+
+    expect(G().public.field['1'][0]).toBeNull(); // Sk-17 removed by the sweep
+    expect(G().public.banished['1']).toContain('Sk-17');
+    expect(G().public.field['1'][1]?.label).toBe('Sk-20'); // protected — routed through removeFieldCard, which returned 'prevented'
+    expect(G().public.banished['1']).not.toContain('Sk-20');
+    // theirSlot (0) was removed by the sweep itself, so resolveBattleOutcome's
+    // own fallback find nothing left to fight and safely no-ops.
+    expect(G().public.field['0'][0]?.currentBp).toBe(6);
+  });
+
+  test('125. an opponent field with no Battle Cards: the gambit is skipped silently, normal combat resolves directly', () => {
+    // Sk-02 is an Action Card, never eligible for the ability's "select all
+    // Battle Cards" text — seeded directly onto the field (bypassing normal
+    // play legality) specifically to exercise the type-filtered zero-target
+    // gate: attackBattleCard's own precondition only requires a non-null
+    // defender, not a Battle Card one, so this is reachable through the real
+    // move even though ordinary play would never place a non-Battle Card on
+    // the field this way.
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21'], turnsTaken: 1 },
+        '1': { field: ['Sk-02'] },
+      },
+    });
+
+    client.moves.attackBattleCard(0, 0);
+
+    expect(G().public.pendingChoice).toBeNull(); // the yesNo never opened at all
+    expect(G().public.field['1'][0]).toBeNull(); // normal combat still ran: Sk-21 (BP6) beat Sk-02's fallback BP 0
+    expect(G().public.field['0'][0]?.currentBp).toBe(6); // untouched — no gambit, no penalty
+  });
+
+  test('126. the flip result is genuinely hidden from both clients while the guess is pending', () => {
+    const { client, client1, G, G1 } = createTestGame({
+      players: {
+        '0': { field: ['Sk-21'], turnsTaken: 1 },
+        '1': { field: ['Sk-20', 'Sk-17'] },
+      },
+      seed: 'sk21-wrongguess-seed',
+    });
+
+    client.moves.attackBattleCard(0, 0);
+    client.moves.resolveChoice(true);
+
+    // The guess pendingChoice is now open — both real field positions stay
+    // fully visible (this design never hides FieldCard identities; see the
+    // Step 2 report), but the one thing that actually matters for the guess
+    // — which card the engine already secretly drew — is never exposed
+    // through EITHER client's own playerView, not even Sk-21's own
+    // controller's.
+    expect(G().public.pendingChoice?.kind).toBe('opponentField');
+    expect(G().secret.pendingFlip).toEqual({});
+    expect(G1().secret.pendingFlip).toEqual({});
+
+    client.moves.resolveChoice(0);
+    expect(G().secret.pendingFlip).toEqual({}); // still empty after resolution — cleared, never revealed
+  });
+});
