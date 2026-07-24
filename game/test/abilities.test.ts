@@ -110,7 +110,16 @@ describe('Sk-11 CHOSEN CONDUIT', () => {
 });
 
 describe('Sk-14a ONE EYED MECHANICAL MONSTER', () => {
-  test('6. opponent field has one Battle Card: prompt opens and resolving removes it', () => {
+  // UPDATED for the designer ruling that effect a resolves immediately,
+  // overriding the printed "may" — no yes/no step, AND (since "remove one"
+  // is no longer optional) no target prompt either when there's only one
+  // legal candidate, matching the same zero/one/many shape dispatchSearch
+  // already uses elsewhere: with nothing left to decide, it just happens.
+  // Previously this asserted an intervening yesNo prompt before even
+  // reaching the (still-real, single-option) target choice; now there is no
+  // prompt of any kind — stronger in that it pins down the actual
+  // immediate-removal behavior, not just "the yesNo is gone."
+  test('6. opponent field has exactly one Battle Card: removed immediately, no prompt of any kind', () => {
     const { client, G } = createTestGame({
       players: {
         '0': { field: [], hand: ['Sk-14'] },
@@ -120,21 +129,33 @@ describe('Sk-14a ONE EYED MECHANICAL MONSTER', () => {
 
     client.moves.playCard(0, 0);
 
-    const yesNo = G().public.pendingChoice;
-    expect(yesNo).not.toBeNull();
-    expect(yesNo?.kind).toBe('yesNo');
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-29');
+  });
 
-    client.moves.resolveChoice(true);
+  test('6b. opponent field has two or more Battle Cards: a real target choice still opens (which one is a genuine decision)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-14'] },
+        '1': { field: ['Sk-29', 'Sk-15'] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
 
     const target = G().public.pendingChoice;
     expect(target).not.toBeNull();
     expect(target?.kind).toBe('opponentField');
-    expect(target?.options).toEqual([0]);
+    expect(target?.sourceLabel).toBe('Sk-14');
+    expect(target?.abilitySlot).toBe('a-target');
+    expect(target?.options).toEqual([0, 1]);
 
-    client.moves.resolveChoice(0);
+    client.moves.resolveChoice(1);
 
-    expect(G().public.field['1'][0]).toBeNull();
-    expect(G().public.banished['1']).toContain('Sk-29');
+    expect(G().public.field['1'][1]).toBeNull();
+    expect(G().public.field['1'][0]?.label).toBe('Sk-29'); // untouched — only the chosen one is removed
+    expect(G().public.banished['1']).toContain('Sk-15');
     expect(G().public.pendingChoice).toBeNull();
   });
 
@@ -350,7 +371,14 @@ describe('Sk-20b SAGE OF DARK OMEN (onActivate)', () => {
     expect(G().public.deckCounts['0']).toBe(1);
   });
 
-  test('17. no Arrival Of Doom in deck: field removal still happens, search resolves silently', () => {
+  // UPDATED for the designer ruling that effect b is gated as a whole on
+  // ARRIVAL OF DOOM actually being retrievable — previously the field
+  // removal ran unconditionally and only the retrieval itself silently
+  // fizzled, leaving the player having paid (lost Sk-20) for nothing. Now
+  // the whole ability resolves silently and Sk-20 stays on the field.
+  // Stronger: it pins down that NOTHING happens, not just that the search
+  // half fizzles.
+  test('17. no Arrival Of Doom in deck: the whole ability resolves silently, Sk-20 stays on the field', () => {
     const { client, G } = createTestGame({
       players: {
         '0': { field: ['Sk-20'], deck: ['Sk-01', 'Sk-02'] },
@@ -361,10 +389,10 @@ describe('Sk-20b SAGE OF DARK OMEN (onActivate)', () => {
     client.moves.activateAbility(0);
 
     expect(G().public.pendingChoice).toBeNull();
-    expect(G().public.field['0'][0]).toBeNull();
-    expect(G().public.banished['0']).toContain('Sk-20');
+    expect(G().public.field['0'][0]?.label).toBe('Sk-20'); // never removed
+    expect(G().public.banished['0']).not.toContain('Sk-20');
     expect(G().public.handCounts['0']).toBe(0);
-    expect(G().public.deckCounts['0']).toBe(2);
+    expect(G().public.deckCounts['0']).toBe(2); // untouched
   });
 });
 
@@ -993,6 +1021,131 @@ describe('removal funneling: cross-cutting regressions', () => {
     expect(G().public.banished['1']).not.toContain('Sk-16');
     expect(G().public.pendingChoice).toBeNull();
   });
+
+  test('141. onRemoved fires for BOTH removal causes in the same match — ability-driven (the gap this fix closed) and battle-driven (unchanged) — each firing exactly once for its own card', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14', null, null], hand: ['Sk-05'], turnsTaken: 1, deck: ['Sk-01', 'Sk-02', 'Sk-03'] },
+        '1': { field: [{ label: 'Sk-17', turnsOnField: 2 }, { label: 'Sk-17', turnsOnField: 1 }, null] },
+      },
+    });
+
+    // First: an ABILITY-cause removal (Sk-05 targeting slot 0's Bloat
+    // Dragon). Before this fix, onRemoved never fired for an ability-driven
+    // removal at all — this is the exact behavior the fix added.
+    client.moves.playCard(0, 1); // Sk-05 into player 0's own slot 1
+    const pending = G().public.pendingChoice;
+    expect(pending?.kind).toBe('opponentField');
+    expect(pending?.sourceLabel).toBe('Sk-05');
+    expect(pending?.options).toEqual([0, 1]);
+
+    client.moves.resolveChoice(0); // remove slot 0's Sk-17 by ABILITY
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]).toBeNull();
+    expect(G().public.banished['1']).toContain('Sk-17');
+    expect(G().secret.decks['0']).toEqual(['Sk-03']); // turnsOnField=2 swept exactly 2
+    expect(G().public.banished['0']).toEqual(expect.arrayContaining(['Sk-01', 'Sk-02']));
+    expect(G().public.banished['0']).toHaveLength(2);
+
+    // Second, same match: an ordinary BATTLE-cause removal of the other
+    // Sk-17 (slot 1) — unchanged by this fix, and must not double-fire or
+    // interfere with the first removal's own sweep.
+    client.moves.attackBattleCard(0, 1); // Sk-14 (BP8) attacks slot 1's Sk-17 (BP3)
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][1]).toBeNull();
+    expect(G().public.banished['1']).toHaveLength(2); // both copies of Sk-17, one per cause
+    expect(G().secret.decks['0']).toEqual([]); // turnsOnField=1 swept exactly 1 more
+    expect(G().public.banished['0']).toEqual(expect.arrayContaining(['Sk-01', 'Sk-02', 'Sk-03']));
+    expect(G().public.banished['0']).toHaveLength(3);
+  });
+
+  test('142. onRemoved does NOT fire when the removal is PREVENTED outright — protectedFromBattleCardRemoval blocks the ability before finishFieldRemoval ever runs', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-05'], deck: ['Sk-01', 'Sk-02', 'Sk-03'] },
+        '1': { field: [{ label: 'Sk-17', turnsOnField: 2, protectedFromBattleCardRemoval: true }] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+    client.moves.resolveChoice(0); // target the protected Sk-17 — removeFieldCard returns 'prevented'
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['1'][0]?.label).toBe('Sk-17'); // untouched
+    expect(G().public.banished['1']).not.toContain('Sk-17');
+    // Direct proof: if onRemoved had fired anyway, player 0's deck would
+    // have lost its top 2 cards. It didn't — nothing here ever reached
+    // finishFieldRemoval.
+    expect(G().secret.decks['0']).toEqual(['Sk-01', 'Sk-02', 'Sk-03']);
+    expect(G().public.banished['0']).toEqual([]);
+  });
+
+  test('143. onRemoved does NOT fire when the removal is PREVENTED by a self-hook (Sk-19a keeping the card on the field) — finishFieldRemoval never runs for that slot', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-19', null, null] }, // Headless Horseman, BP5
+        '1': { field: ['Sk-16'], turnsTaken: 1, deck: ['Sk-02'] }, // see test 94's comment on the deck filler
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.attackBattleCard(0, 0); // player 1 attacks and wins; Sk-19 would be removed by battle
+
+    const pending = G().public.pendingChoice;
+    expect(pending?.pid).toBe('0');
+    expect(pending?.sourceLabel).toBe('Sk-19');
+    expect(pending?.abilitySlot).toBe('removal-confirm');
+
+    client.moves.resolveChoice(true); // player 0 (the defender) keeps it on the field
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-19');
+    expect(G().public.field['0'][0]?.replacementUsed).toBe(true);
+    // Sk-19 itself carries no onRemoved ability, so there's no card-specific
+    // side effect to check here the way tests 141/142/144 use Sk-17's own
+    // deck-sweep as direct proof. What this asserts instead is the general
+    // contract: the card was never banished, meaning finishFieldRemoval —
+    // the single call site that fires onRemoved — never ran for this slot.
+    expect(G().public.banished['0']).not.toContain('Sk-19');
+  });
+
+  test("144. onRemoved does NOT fire when the removal is PREVENTED by a guardian substitution (Sk-29a) — the redirected removal fires onRemoved for the GUARDIAN's own slot, never the saved card's", () => {
+    const { client, client1, G, G1 } = createTestGame({
+      players: {
+        '0': { field: [{ label: 'Sk-17', turnsOnField: 2 }, 'Sk-29', null] },
+        '1': { hand: ['Sk-05'], deck: ['Sk-01', 'Sk-02', 'Sk-03'] },
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.playCard(0, 0); // opponent plays Sk-05
+    client1.moves.resolveChoice(0); // targets Sk-17 (slot 0), not Sk-29 (slot 1)
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.pid).toBe('0');
+    expect(pending?.sourceLabel).toBe('Sk-29');
+    expect(pending?.abilitySlot).toBe('guard-confirm');
+
+    client.moves.resolveChoice(true); // player 0, Rarewolf's own owner, substitutes it in
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-17'); // survived
+    expect(G().public.field['0'][1]).toBeNull(); // Rarewolf removed instead
+    expect(G().public.banished['0']).toContain('Sk-29');
+    expect(G().public.banished['0']).not.toContain('Sk-17');
+    // Direct proof: Sk-17's own onRemoved never fired — player 1's deck (the
+    // ability owner's deck, the one Sk-17's ability would have swept) is
+    // completely untouched, and nothing was banished from it. Player 1's own
+    // deck contents aren't visible in player 0's playerView (G()), so this
+    // reads through player 1's own client instead (G1()) — the same
+    // secrecy convention every other cross-player deck check in this file
+    // already follows.
+    expect(G1().secret.decks['1']).toEqual(['Sk-01', 'Sk-02', 'Sk-03']);
+    expect(G().public.banished['1']).toEqual([]);
+  });
 });
 
 describe('Sk-12 CURSE OF STONE (persistent lock)', () => {
@@ -1363,11 +1516,12 @@ describe('Sk-20a SAGE OF DARK OMEN (multi-select)', () => {
 
     client.moves.activateAbility(0);
 
-    // Effect b fires unconditionally in the same dispatch (already-live
-    // behavior) — Sk-20 is removed from the field immediately, and effect
-    // a's yesNo survives that untouched (see the wiring comment for why).
-    expect(G().public.field['0'][0]).toBeNull();
-    expect(G().public.banished['0']).toContain('Sk-20');
+    // Effect b is now gated on ARRIVAL OF DOOM being in the deck (it isn't
+    // here — Sk-14/Sk-15/Sk-17 only), so it resolves silently and Sk-20
+    // stays on the field; effect a's own yesNo is unaffected either way
+    // (see the wiring comment for why the two don't interfere).
+    expect(G().public.field['0'][0]?.label).toBe('Sk-20');
+    expect(G().public.banished['0']).not.toContain('Sk-20');
     const confirm = G().public.pendingChoice;
     expect(confirm?.kind).toBe('yesNo');
     expect(confirm?.sourceLabel).toBe('Sk-20');
@@ -1404,9 +1558,11 @@ describe('Sk-20a SAGE OF DARK OMEN (multi-select)', () => {
 
     expect(G().public.pendingChoice).toBeNull();
     expect(G().secret.decks['0']).toEqual(['Sk-17']);
+    expect(G().public.field['0'][0]?.label).toBe('Sk-20'); // effect b never fired — still on the field
     expect(G().public.banished['0']).toEqual(
-      expect.arrayContaining(['Sk-20', 'Sk-01', 'Sk-02', 'Sk-04', 'Sk-14', 'Sk-15'])
+      expect.arrayContaining(['Sk-01', 'Sk-02', 'Sk-04', 'Sk-14', 'Sk-15'])
     );
+    expect(G().public.banished['0']).not.toContain('Sk-20');
   });
 
   test('63c. a partial selection cannot resolve: finalizing early on an incomplete EXACT choice is rejected', () => {
@@ -1449,8 +1605,11 @@ describe('Sk-20a SAGE OF DARK OMEN (multi-select)', () => {
     expect(G().public.pendingChoice).toBeNull();
     // Nothing tentatively picked ever takes effect — hand is fully intact.
     expect(G().secret.hands['0']).toEqual(['Sk-01', 'Sk-02', 'Sk-04', 'Sk-27']);
-    // Only Sk-20 itself (effect b, unrelated and already unconditional) is banished.
-    expect(G().public.banished['0']).toEqual(['Sk-20']);
+    // Effect b is gated on ARRIVAL OF DOOM being in the deck — it isn't
+    // (deck defaults to empty here) — so it never fires either: nothing at
+    // all is banished, and Sk-20 stays on the field.
+    expect(G().public.banished['0']).toEqual([]);
+    expect(G().public.field['0'][0]?.label).toBe('Sk-20');
   });
 
   test('63e. an exact requirement with too few candidates resolves silently (no prompt at all)', () => {
@@ -1463,10 +1622,11 @@ describe('Sk-20a SAGE OF DARK OMEN (multi-select)', () => {
 
     client.moves.activateAbility(0);
 
-    // Effect b still fires unconditionally; effect a's yesNo never opens at
-    // all, since its cost could never be paid.
-    expect(G().public.field['0'][0]).toBeNull();
-    expect(G().public.banished['0']).toEqual(['Sk-20']);
+    // Effect b is gated on ARRIVAL OF DOOM being in the deck — deck is
+    // empty here, so it resolves silently and Sk-20 stays; effect a's
+    // yesNo never opens either, since its own cost could never be paid.
+    expect(G().public.field['0'][0]?.label).toBe('Sk-20');
+    expect(G().public.banished['0']).toEqual([]);
     expect(G().public.pendingChoice).toBeNull();
     expect(G().secret.hands['0']).toEqual(['Sk-01', 'Sk-02']);
   });
@@ -3384,5 +3544,85 @@ describe('Sk-28b/c SKULLFACE (planted-card countdown)', () => {
     client1.moves.endTurn(); // -> player 0's turn; bothReady, hand < 5, deck empty -> loss
 
     expect(G().public.loser).toBe('0');
+  });
+});
+
+describe('attackHandRandom (Sk-02 hand/deck-attack intercept parity)', () => {
+  // GAP 2: attackHandRandom had never been referenced by any test in the
+  // repo, so the fix wiring it through interceptHandOrDeckAttack (the same
+  // Sk-02 "attacked while in hand" guard attackHand and attackDeck already
+  // used) had zero coverage. Both seeds below were verified empirically
+  // against this exact harness (createTestGame's seed threads straight into
+  // boardgame.io's own deterministic PRNG): seed 'a' makes random.Die(3)
+  // pick index 1 of a 3-card hand; seed 'f' makes it pick index 0. Neither
+  // depends on which labels sit in the hand — only on hand length and the
+  // fixed seed — so the same seed is reused across fixtures below with
+  // confidence it lands on the same index every time.
+  test('141b. Sk-02 sitting in the defender\'s hand: attackHandRandom\'s intercept fires — the attacking card is removed, Sk-02 is never touched', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], turnsTaken: 1 },
+        '1': { hand: ['Sk-01', 'Sk-02', 'Sk-03'] }, // seed 'a' -> random.Die(3) picks index 1 = Sk-02
+      },
+      seed: 'a',
+    });
+
+    client.moves.attackHandRandom(0);
+
+    expect(G().public.field['0'][0]).toBeNull(); // the attacker itself was removed
+    expect(G().public.banished['0']).toContain('Sk-14');
+    expect(G().public.handCounts['1']).toBe(3); // Sk-02's hand is completely untouched
+    expect(G().public.banished['1']).toEqual([]); // nothing removed from the defender's hand
+    expect(G().public.attackedThisTurn).toBe(true);
+  });
+
+  test('141c. no Sk-02 anywhere in the defender\'s hand: attackHandRandom resolves normally — the intercept did not change the ordinary path', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], turnsTaken: 1 },
+        '1': { hand: ['Sk-04', 'Sk-01', 'Sk-03'] }, // no Sk-02 anywhere; seed 'f' -> index 0 = Sk-04
+      },
+      seed: 'f',
+    });
+
+    client.moves.attackHandRandom(0);
+
+    expect(G().public.field['0'][0]?.label).toBe('Sk-14'); // attacker untouched — no intercept fired
+    expect(G().public.banished['0']).toEqual([]);
+    expect(G().public.handCounts['1']).toBe(2); // one card removed from the defender's hand, as normal
+    expect(G().public.banished['1']).toContain('Sk-04');
+    expect(G().public.attackedThisTurn).toBe(true);
+  });
+
+  test('141d. attackHand and attackHandRandom now behave identically with respect to the Sk-02 intercept', () => {
+    // A: attackHand, explicit target index -> deliberately aimed at Sk-02.
+    const gameA = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], turnsTaken: 1 },
+        '1': { hand: ['Sk-04', 'Sk-02', 'Sk-03'] },
+      },
+    });
+    gameA.client.moves.attackHand(0, 1); // index 1 = Sk-02, explicit
+
+    // B: attackHandRandom, seeded so the RNG lands on the same index (1) —
+    // reaching Sk-02 through the random path instead of an explicit choice.
+    const gameB = createTestGame({
+      players: {
+        '0': { field: ['Sk-14'], turnsTaken: 1 },
+        '1': { hand: ['Sk-01', 'Sk-02', 'Sk-03'] },
+      },
+      seed: 'a',
+    });
+    gameB.client.moves.attackHandRandom(0);
+
+    // Both paths must produce the exact same shape of outcome: the
+    // intercept fires, the attacker is banished instead of Sk-02, and the
+    // defender's hand is completely untouched.
+    for (const { G } of [gameA, gameB]) {
+      expect(G().public.field['0'][0]).toBeNull();
+      expect(G().public.banished['0']).toContain('Sk-14');
+      expect(G().public.handCounts['1']).toBe(3);
+      expect(G().public.banished['1']).toEqual([]);
+    }
   });
 });

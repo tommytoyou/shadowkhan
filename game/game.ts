@@ -287,9 +287,14 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       },
     },
 
+    // DESIGNER RULING (bug fix): attackHand routes through
+    // interceptHandOrDeckAttack (Sk-02's "attacked while in hand" guard) but
+    // this move — functionally "attackHand with a random target" — never
+    // did, an asymmetry preserved deliberately during the removal-funnel
+    // work rather than fixed. Both paths get the intercept now.
     attackHandRandom: {
       client: false,
-      move: ({ G, ctx, random }, mySlot: number) => {
+      move: ({ G, ctx, random, events }, mySlot: number) => {
         if (G.public.pendingChoice) return INVALID_MOVE;
         const pid = ctx.currentPlayer;
         const opp = pid === '0' ? '1' : '0';
@@ -309,6 +314,11 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
         // random.Die(n) returns 1..n inclusive — subtract 1 for a 0-based index.
         const idx = random.Die(oppHand.length) - 1;
+        const targetLabel = oppHand[idx];
+        if (interceptHandOrDeckAttack(G, { ctx, random, events }, targetLabel, pid, mySlot)) {
+          return;
+        }
+
         removeFromOpponentHand(G, opp, idx);
         syncCounts(G);
       },

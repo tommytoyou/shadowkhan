@@ -111,9 +111,9 @@ export interface ChoiceAbility {
 
 /** Ability-driven field removal (cause: 'ability') — routes through the
  *  shared removeFieldCard so any removal-replacement hook on the target
- *  still gets a chance to intervene. Preserves this helper's long-standing
- *  behavior of not firing onRemoved (see removeFieldCard's `opts`) — only
- *  the battle-combat call sites in game.ts pass fireOnRemoved. */
+ *  still gets a chance to intervene. onRemoved fires for this exactly like
+ *  any other completed removal — see finishFieldRemoval's own doc comment;
+ *  it is no longer battle-only. */
 export function removeOpponentFieldCard(
   G: ShadowkhanG,
   ctx: EngineCtx,
@@ -1011,15 +1011,42 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
-  // Sk-14 ONE EYED MECHANICAL MONSTER, ability b: "When this card removes a
-  // card by battle, you may remove 1 card from your opponent's hand or the
-  // top of their deck." Dispatches the initial yesNo only if the opponent
-  // has at least one legal source (hand or deck); if both are empty, no
-  // prompt opens at all. (Ability a lives in CHOICE_ABILITIES_BY_LABEL below
-  // as a plain trigger-bound entry, using its `leadsTo` field so fireTrigger's
-  // generic pre-check looks ahead at 'a-target' before opening the yesNo —
-  // see willHaveLegalOutcome in fireTrigger.)
+  // Sk-14 ONE EYED MECHANICAL MONSTER.
+  // ability a: "When this card is summoned, you may remove 1 of your
+  // opponent's Battle Cards from the field." DESIGNER RULING: resolves
+  // IMMEDIATELY, overriding the printed "may" — no yes/no prompt. Moved out
+  // of CHOICE_ABILITIES_BY_LABEL's old yesNo+leadsTo shape (which asked
+  // "remove one? -> yes -> which one?") into a plain auto run here, using
+  // the same zero/one/many shape dispatchSearch already establishes
+  // elsewhere in this file: zero candidates is the existing zero-target
+  // gate (silent no-op, unchanged); exactly one applies immediately with NO
+  // pendingChoice at all, since there is no genuine decision left once
+  // "remove one" is no longer optional and only one card qualifies; two or
+  // more still opens the real 'a-target' choice, since WHICH card to remove
+  // remains a genuine player decision the text never resolves for them.
+  // ability b: "When this card removes a card by battle, you may remove 1
+  // card from your opponent's hand or the top of their deck." Dispatches
+  // the initial yesNo only if the opponent has at least one legal source
+  // (hand or deck); if both are empty, no prompt opens at all. Unaffected
+  // by the ruling above — b keeps its own "may" prompt.
   'Sk-14': [
+    {
+      slot: 'a',
+      trigger: 'onSummon',
+      auto: true,
+      run: ({ G, ctx, self }) => {
+        const opp = self.pid === '0' ? '1' : '0';
+        const options = G.public.field[opp]
+          .map((c, i) => (c ? i : null))
+          .filter((i): i is number => i !== null);
+        if (options.length === 0) return;
+        if (options.length === 1) {
+          removeOpponentFieldCard(G, ctx, opp, options[0]);
+          return;
+        }
+        openChoice(G, ctx, self, 'Sk-14', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-14']['a-target']);
+      },
+    },
     {
       slot: 'b',
       trigger: 'onBattleWin',
@@ -1076,8 +1103,11 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   // Sk-17 BLOAT DRAGON: "When this card is removed, your opponent must remove
   // cards from the top of their deck equal to the number of turns this card
   // was on the field." Unconditional, fixed target (top of opponent's deck,
-  // repeated). Uses the new 'onRemoved' trigger and FieldCard.turnsOnField
-  // (incremented in turn.onEnd).
+  // repeated). Uses the 'onRemoved' trigger and FieldCard.turnsOnField
+  // (incremented in turn.onEnd). DESIGNER RULING: onRemoved fires for ANY
+  // completed removal, not just a battle loss — see finishFieldRemoval —
+  // so this now correctly fires for an ability-driven removal too (e.g.
+  // Sk-05/Sk-10/Sk-14a targeting it), which it previously did not.
   'Sk-17': [
     {
       slot: 'a',
@@ -1122,10 +1152,15 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
   // in the same dispatch.
   //
   // effect b ("Remove this card from the field and add 1 Arrival Of Doom
-  //   from your deck to your hand.") — unconditional (no "may"): the
-  //   field-removal always happens; the deck retrieval is independently
-  //   zero-gated by dispatchSearch (no copy in deck -> silent fizzle, card
-  //   is still removed).
+  //   from your deck to your hand.") — DESIGNER RULING: gated as a whole
+  //   on ARRIVAL OF DOOM actually being retrievable, using the same
+  //   zero-target gate every other search-driven ability in this file
+  //   checks BEFORE mutating anything (see Sk-04a/Sk-05a above) — not the
+  //   old shape, where the field-removal ran unconditionally and only the
+  //   retrieval itself was gated by dispatchSearch's own internal check,
+  //   which left the card removed with nothing gained whenever no copy
+  //   existed in the deck. Checking first means the whole ability now
+  //   resolves silently and Sk-20 stays on the field in that case.
   'Sk-20': [
     {
       slot: 'a',
@@ -1144,6 +1179,10 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
       auto: true,
       run: ({ G, ctx, self }) => {
         if (!G.public.field[self.pid][self.slot]) return;
+        const hasArrivalOfDoom =
+          searchIndices(G, 'deck', self.pid, (label) => CARD_BY_LABEL[label]?.name === 'ARRIVAL OF DOOM')
+            .length > 0;
+        if (!hasArrivalOfDoom) return;
         removeFieldCard(G, ctx, self.pid, self.slot, 'ability');
         dispatchSearch(
           G,
@@ -1652,12 +1691,6 @@ function willHaveLegalOutcome(
 export type RemovalCause = 'battle' | 'ability';
 
 export interface RemovalOpts {
-  /** Fire onRemoved (while the card is still field-resident, matching
-   *  fireTrigger's own field lookup) once the removal is confirmed to
-   *  proceed. Only the battle-combat call sites in game.ts pass this,
-   *  preserving the pre-existing (if inconsistent) fact that ability-driven
-   *  removals never fired onRemoved — not something this refactor changes. */
-  fireOnRemoved?: boolean;
   /** Runs after the card has been banished, only if the removal actually
    *  went through (never on prevent/redirect) — e.g. attackBattleCard's
    *  onBattleWin for the attacker, which must not fire if the defender
@@ -1850,7 +1883,7 @@ const GUARDIAN_HOOKS: Record<string, GuardianHook> = {
   // so this applies to both removal causes. No cost. Accepting substitutes
   // Rarewolf itself for the original target — a removal still genuinely
   // happens, just redirected to a different slot, so it reuses the ORIGINAL
-  // opts (fireOnRemoved/afterRemoved) exactly as declining would. currentBp
+  // opts (afterRemoved) exactly as declining would. currentBp
   // is checked (not printed bp), matching how live BP-threshold checks work
   // elsewhere (e.g. eligibleOwnBattleCardsAtOrBelow).
   'Sk-29': {
@@ -2221,10 +2254,19 @@ export function checkCopyIdentityIntegrity(G: ShadowkhanG, ctx: EngineCtx): void
   }
 }
 
-/** Fires onRemoved (if requested, while the card is still field-resident),
- *  banishes it, then runs afterRemoved (if requested) — the exact sequence
- *  attackBattleCard has always used. Shared by removeFieldCard's
- *  synchronous path and every hook's "declined" resolve() branch. */
+/** Fires onRemoved (while the card is still field-resident), banishes it,
+ *  then runs afterRemoved (if requested) — the exact sequence
+ *  attackBattleCard has always used for a battle-cause removal. Shared by
+ *  removeFieldCard's synchronous path and every hook's "declined" resolve()
+ *  branch — every call to this function represents a removal that is
+ *  ACTUALLY completing (removeFieldCard never calls it for a 'prevented'
+ *  result, and a hook/guardian's own "keep it instead" branch never calls
+ *  it either — see their resolve()s), so onRemoved firing unconditionally
+ *  here, regardless of `cause`, is exactly "fires on any removal that
+ *  actually completes" with no per-card gating needed anywhere else.
+ *  RULING: onRemoved is no longer battle-only — ability-driven removals
+ *  (Sk-05/Sk-10/Sk-14a/Sk-20b/Sk-21a/Sk-26a/Sk-03b/Sk-11's field-wipe, and
+ *  any future one) now fire it too, the same as a battle loss always has. */
 function finishFieldRemoval(
   G: ShadowkhanG,
   ctx: EngineCtx,
@@ -2233,7 +2275,7 @@ function finishFieldRemoval(
   cause: RemovalCause,
   opts: RemovalOpts | undefined
 ): void {
-  if (opts?.fireOnRemoved) fireTrigger(G, ctx, 'onRemoved', { pid, slot });
+  fireTrigger(G, ctx, 'onRemoved', { pid, slot });
   finalizeFieldRemoval(G, ctx, pid, slot, cause);
   opts?.afterRemoved?.(G, ctx);
 }
@@ -2352,7 +2394,6 @@ export function resolveBattleOutcome(
 
   if (attacker.currentBp > defender.currentBp) {
     removeFieldCard(G, ctx, opp, theirSlot, 'battle', {
-      fireOnRemoved: true,
       afterRemoved: (G2, ctx2) => fireTrigger(G2, ctx2, 'onBattleWin', { pid, slot: mySlot }),
     });
   } else if (attacker.currentBp < defender.currentBp) {
@@ -2362,10 +2403,10 @@ export function resolveBattleOutcome(
       // attacker; the defender is only removed once its BP hits zero.
       modifyBp(defender, -attacker.currentBp);
       if (defender.currentBp <= 0) {
-        removeFieldCard(G, ctx, opp, theirSlot, 'battle', { fireOnRemoved: true });
+        removeFieldCard(G, ctx, opp, theirSlot, 'battle');
       }
     } else {
-      removeFieldCard(G, ctx, pid, mySlot, 'battle', { fireOnRemoved: true });
+      removeFieldCard(G, ctx, pid, mySlot, 'battle');
     }
   } else {
     // Shockwave: both lose top deck card face-down
@@ -3144,27 +3185,10 @@ const CHOICE_ABILITIES_BY_LABEL: Record<string, Record<string, ChoiceAbility>> =
     },
   },
 
-  // Sk-14 ONE EYED MECHANICAL MONSTER, ability a: "When this card is
-  // summoned, you may remove 1 of your opponent's Battle Cards from the
-  // field." A yesNo entry, chaining into an opponentField target pick.
+  // Sk-14 ONE EYED MECHANICAL MONSTER, ability a target step. Reached
+  // directly from ABILITIES_BY_LABEL['Sk-14']'s own onSummon run now (no
+  // yes/no gate — see the designer ruling there); this entry is unchanged.
   'Sk-14': {
-    a: {
-      needsChoice: true,
-      trigger: 'onSummon',
-      leadsTo: 'a-target',
-      prompt: "One Eyed Mechanical Monster: remove one of your opponent's Battle Cards from the field?",
-      kind: 'yesNo',
-      getOptions: () => null,
-      resolve: (G, ctx, self, answer) => {
-        if (answer !== true) return;
-        const opp = self.pid === '0' ? '1' : '0';
-        const options = G.public.field[opp]
-          .map((c, i) => (c ? i : null))
-          .filter((i): i is number => i !== null);
-        if (options.length === 0) return;
-        openChoice(G, ctx, self, 'Sk-14', 'a-target', CHOICE_ABILITIES_BY_LABEL['Sk-14']['a-target']);
-      },
-    },
     'a-target': {
       needsChoice: true,
       prompt: "Choose which of your opponent's Battle Cards to remove.",
