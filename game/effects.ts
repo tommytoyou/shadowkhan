@@ -303,6 +303,95 @@ export function placeCardOnField(
   fireTrigger(G, ctx, 'onSummon', { pid, slot });
 }
 
+// ---------------------------------------------------------------------------
+// Attach targets. Some cards are never placed onto their own field slot at
+// all: their printed text is "used on" / "placed under" another field card
+// (Sk-09 "can only be used on Shadow Ghost"; a future Sk-26 "place it under
+// this card"). One registry, keyed by the ATTACHING card's own label —
+// playCard's move body checks this BEFORE treating a play as a normal
+// placement, so `slot` in that case means "attach to whatever occupies this
+// slot" instead of "place into this empty slot". No second play path: it's
+// still the same playCard move, same handIndex/slot argument shape, just a
+// different branch through the same body.
+//
+// Scope for this pass: Sk-09 only. Sk-26a also needs this exact mechanism
+// (an opponent-field target, repeatable, with cards later returned from
+// under it — see its own DEFERRED_ABILITIES entry) but is deliberately not
+// wired here.
+// ---------------------------------------------------------------------------
+
+export interface AttachTarget {
+  /** Printed slot letter, for traceability — not read by playCard itself. */
+  slot: 'a' | 'b' | 'c' | 'd';
+  /** Does field slot `targetSlot` on pid's own field hold a legal target for
+   *  this card right now? The broad "is there a legal target ANYWHERE"
+   *  precondition lives in PLAY_GATES instead (same shape every other "can
+   *  only play if..." card already uses) — this is the more precise check
+   *  that the SPECIFIC slot argument actually points at one. */
+  isValidTarget: (G: ShadowkhanG, pid: string, targetSlot: number) => boolean;
+  /** Applies this card's own effect once attached. Runs synchronously, no
+   *  trigger/choice machinery — every currently-wireable attach effect is
+   *  immediate and unconditional (no "you may" branching at attach time),
+   *  so this doesn't need the fireTrigger/ABILITIES_BY_LABEL machinery,
+   *  which looks abilities up by whatever's field-resident at self.slot —
+   *  the attaching card never is. */
+  onAttach: (G: ShadowkhanG, pid: string, hostSlot: number) => void;
+}
+
+const ATTACH_TARGETS: Record<string, AttachTarget> = {
+  // Sk-09 POWER OF THE SHADOWS: "Shadow Ghost cannot be removed by Battle
+  // Cards or card effects until the end of your opponent's turn after this
+  // card was activated." Read consistently with the existing designer
+  // ruling on Sk-15a/Sk-16b's near-identical wording ("no card is
+  // unbanishable... losing an ordinary BP battle always banishes"):
+  // 'protectedFromRemoval' is checked only for cause === 'ability' in
+  // removeFieldCard, same scope as protectedFromBattleCardRemoval. "Until
+  // the end of your opponent's turn after this card was activated" is the
+  // same window as Sk-12/Sk-13c's "until the end of the opponent's next
+  // turn" — expiresAtGlobalTurn = globalTurns + 2, "activated" read as the
+  // moment this card is attached (it has no activateAbility path of its
+  // own: no field slot, so no cardFieldIndex to activate by).
+  'Sk-09': {
+    slot: 'a',
+    isValidTarget: (G, pid, targetSlot) => {
+      const card = G.public.field[pid][targetSlot];
+      return !!card && CARD_BY_LABEL[card.label]?.name === 'SHADOW GHOST';
+    },
+    onAttach: (G, pid, hostSlot) => {
+      const globalTurns = G.public.turnsTaken['0'] + G.public.turnsTaken['1'];
+      G.public.activeEffects.push({
+        kinds: ['protectedFromRemoval'],
+        targetPid: pid,
+        targetSlot: hostSlot,
+        sourceLabel: 'Sk-09',
+        sourcePid: pid,
+        sourceSlot: hostSlot,
+        expiresAtGlobalTurn: globalTurns + 2,
+      });
+    },
+  },
+};
+
+/** True if `label` is an attach-target card (see ATTACH_TARGETS) — playCard's
+ *  single check for which branch a play takes. Mirrors isPlayLegal's own
+ *  role as the one encapsulated entry point into a *_BY_LABEL registry, so
+ *  game.ts never reaches into ATTACH_TARGETS directly. */
+export function getAttachTarget(label: string): AttachTarget | undefined {
+  return ATTACH_TARGETS[label];
+}
+
+/** Attaches `label` to the field card at pid/hostSlot — pushes it onto the
+ *  host's own `attached` list and runs the attaching card's own onAttach
+ *  effect (see ATTACH_TARGETS). The single mechanism behind every
+ *  attach-target card; playCard calls this instead of placeCardOnField when
+ *  the played label has an ATTACH_TARGETS entry. */
+export function attachCardToHost(G: ShadowkhanG, pid: string, hostSlot: number, label: string): void {
+  const host = G.public.field[pid][hostSlot];
+  if (!host) return;
+  host.attached.push(label);
+  ATTACH_TARGETS[label]?.onAttach(G, pid, hostSlot);
+}
+
 /** Purges `label` from owner's banishedFromField, if present — called
  *  wherever a label leaves `banished`, so the tag never outlives the removed
  *  card it describes (see banishedFromField's doc comment in state.ts). */
@@ -428,6 +517,19 @@ const PLAY_GATES: Record<string, PlayGate> = {
       const oppCount = G.public.banished[opp].filter(isSevenOrEight).length;
       return ownCount >= 2 && oppCount >= 1;
     },
+  },
+
+  // Sk-09 POWER OF THE SHADOWS: "This card can only be used on Shadow
+  // Ghost." The BROAD precondition — is there a Shadow Ghost anywhere on
+  // pid's own field at all — lives here, matching every other "can only
+  // play if..." card. This does NOT verify that the SPECIFIC slot the
+  // player targets is that Shadow Ghost — that's a distinct, more precise
+  // failure mode (Shadow Ghost exists, but you pointed at the wrong slot),
+  // checked separately by ATTACH_TARGETS['Sk-09'].isValidTarget in playCard.
+  'Sk-09': {
+    slot: 'a',
+    check: (G, pid) =>
+      G.public.field[pid].some((c) => c && CARD_BY_LABEL[c.label]?.name === 'SHADOW GHOST'),
   },
 };
 
@@ -1755,12 +1857,26 @@ function expireScheduledSummonsForSlot(G: ShadowkhanG, pid: string, slot: number
  *  declined replacement's own resolve() share. The sole choke point for
  *  every field removal, so it's also the single place that tags a label as
  *  field-origin in banishedFromField (see its doc comment in state.ts) —
- *  every other path into `banished` (hand/deck removal) leaves it untagged. */
+ *  every other path into `banished` (hand/deck removal) leaves it untagged.
+ *
+ *  Any cards attached to this one (see FieldCard.attached / ATTACH_TARGETS)
+ *  are banished face-up alongside it: the printed text never says what
+ *  becomes of an attach-target card once its host is gone, but "used on"
+ *  language implies it was consumed as an enhancement, not left to persist
+ *  independently — matching how an equipment/aura-shaped card conventionally
+ *  falls with its host elsewhere in this ruleset's own removal handling
+ *  (nothing in this engine has a card outlive the field slot it depends on).
+ *  Tagged field-origin too, same as the host: an attached card WAS on the
+ *  field via its host, even though it never had a field slot of its own. */
 function finalizeFieldRemoval(G: ShadowkhanG, pid: string, slot: number): void {
   const card = G.public.field[pid][slot];
   if (!card) return;
   G.public.banished[pid].push(card.label);
   G.public.banishedFromField[pid].push(card.label);
+  for (const attachedLabel of card.attached) {
+    G.public.banished[pid].push(attachedLabel);
+    G.public.banishedFromField[pid].push(attachedLabel);
+  }
   G.public.field[pid][slot] = null;
   expireEffectsForSlot(G, pid, slot);
   expireScheduledSummonsForSlot(G, pid, slot);
@@ -1786,13 +1902,16 @@ function finishFieldRemoval(
  * The single choke point for removing a card from a field slot. Checks, in
  * order, BEFORE any state change:
  *  1. protectedFromBattleCardRemoval (Sk-15a, Sk-16b — "cannot be removed
- *     by Battle Card[s]/effects"). RULING: no card is unbanishable in an
- *     ordinary BP battle — this flag protects ONLY against an
- *     ability-driven removal (cause === 'ability'; the Sk-05/Sk-10/Sk-14
- *     style of "remove one Battle Card" effect), never a battle loss
- *     (cause === 'battle', which attackBattleCard always passes and never
- *     gates on this flag itself — see game.ts). If it applies, the removal
- *     is blocked outright and this returns 'prevented'.
+ *     by Battle Card[s]/effects") OR an active 'protectedFromRemoval' effect
+ *     (Sk-09b — same wording shape, "cannot be removed by Battle Cards or
+ *     card effects", just with a stated duration instead of lasting
+ *     forever). RULING: no card is unbanishable in an ordinary BP battle —
+ *     both protect ONLY against an ability-driven removal (cause ===
+ *     'ability'; the Sk-05/Sk-10/Sk-14 style of "remove one Battle Card"
+ *     effect), never a battle loss (cause === 'battle', which
+ *     attackBattleCard always passes and never gates on either mechanism
+ *     itself — see game.ts). If either applies, the removal is blocked
+ *     outright and this returns 'prevented'.
  *  2. REMOVAL_HOOKS for the card being removed (a SELF-hook):
  *     - no hook, or the hook doesn't apply right now (eligible() is false):
  *       falls through to step 3.
@@ -1838,7 +1957,10 @@ export function removeFieldCard(
   const card = G.public.field[pid][slot];
   if (!card) return 'removed';
 
-  if (cause === 'ability' && card.protectedFromBattleCardRemoval) {
+  if (
+    cause === 'ability' &&
+    (card.protectedFromBattleCardRemoval || hasActiveEffect(G, pid, slot, 'protectedFromRemoval'))
+  ) {
     return 'prevented';
   }
 
@@ -3036,16 +3158,14 @@ export interface DeferredAbility {
 
 export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
-  { label: 'Sk-09', slot: 'a', classification: 'GATE', reason: "Only usable on Shadow Ghost — this is a targeting/attach requirement (which field card the Power Card enhances), not a boolean state condition, so it doesn't fit PLAY_GATES's check(G, pid) => boolean shape. playCard has no attach-target parameter for Power Cards to express 'only usable on card X' at all. Excluded from this pass rather than approximated as 'Shadow Ghost merely present somewhere on the field', which would misrepresent the attachment relationship." },
-  { label: 'Sk-09', slot: 'b', classification: 'NEEDS_CHOICE', reason: "A continuous removal-immunity effect with a stated duration — the persistent-effect registry (hasActiveEffect/expiresAtGlobalTurn) added for Sk-12/Sk-22 could express it directly. Still blocked on the same unrelated gap as Sk-09a though: depends on Sk-09's attach targeting (which specific field card this protects), which isn't wired." },
   { label: 'Sk-16', slot: 'c', classification: 'NEEDS_CHOICE', reason: "'you may remove 1 face-down Power Card...to negate' — optional, needs a reactive negation system." },
   { label: 'Sk-16', slot: 'd', classification: 'NEEDS_CHOICE', reason: 'Same shape as slot c for Action Cards; printed text is also flagged low-confidence in cards.ts.' },
   { label: 'Sk-18', slot: 'a', classification: 'NEEDS_CHOICE', reason: "The 'select 1 of your removed cards' pick is now searchable (zone: 'removed'), but the effect isn't a search-and-move — it's a copy-identity mechanic ('this card's BP and effects become identical to the selected card'), which has no representation in FieldCard at all (no notion of a card impersonating another card's label/BP/ability set). The zone gap being solved doesn't touch this." },
   { label: 'Sk-18', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-18a's copy-identity selection, which is still blocked — see Sk-18a." },
   { label: 'Sk-21', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'shuffle them face-down, flip the top card face-up, and if you call it correctly...' — the randomness half (EngineCtx/random.Shuffle, wired for Sk-07a this pass) is no longer the blocker. What's still missing is the guessing interaction itself: a way for the player to submit a guess BEFORE the flip, and a PendingChoiceKind/resolve shape that reveals the flipped card and compares it to that guess — none of which exists. Deliberately not attempted this pass (out of scope: needs a guessing interaction beyond randomness, not just a shuffle)." },
   { label: 'Sk-21', slot: 'b', classification: 'NEEDS_CHOICE', reason: "Depends on Sk-21a's guess outcome, which is itself still blocked — see Sk-21a." },
-  { label: 'Sk-26', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can select one Battle Card...place it under this card' — optional target selection; also needs a new 'cards attached under this card' mechanic." },
-  { label: 'Sk-26', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Depends entirely on Sk-26a's 'place under this card' mechanic, which is deferred — nothing will ever be attached to return." },
+  { label: 'Sk-26', slot: 'a', classification: 'NEEDS_CHOICE', reason: "'you can select one Battle Card...place it under this card' — the underlying attach mechanism now exists (FieldCard.attached / ATTACH_TARGETS / attachCardToHost, added for Sk-09), but Sk-26a's own shape is considerably more than Sk-09's: it targets a card on the OPPONENT's field (not a fixed named card), is repeatable ('once per turn', not a one-shot attach), and needs 'remove all cards under this card' wired into its own removal handling. Deliberately not attempted this pass — out of scope, not blocked by the same gap as before." },
+  { label: 'Sk-26', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Depends entirely on Sk-26a, which is deferred — nothing will ever be attached to return. Also needs its own 'return from under this card to the field, overflow to the deck' logic, distinct from anything Sk-09 needed." },
   { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },
   { label: 'Sk-28', slot: 'c', classification: 'NOT_IMPLEMENTED', reason: 'Same missing infrastructure as slot b — and this branch is a turn-count timeout, not a draw event, so onDraw does not apply to it at all.' },
 ];

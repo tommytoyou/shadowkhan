@@ -2517,3 +2517,140 @@ describe('Sk-06 TRANSFORMATION CHAMBER (scheduled summon)', () => {
     expect(G().secret.scheduledSummons['0']).toEqual([]);
   });
 });
+
+describe('Sk-09 POWER OF THE SHADOWS (attach target)', () => {
+  // Sk-15 is seeded directly (bypassing onSummon, per the existing test
+  // convention) so its own protectedFromBattleCardRemoval flag is never set
+  // — these tests are specifically about Sk-09b's OWN protection, not
+  // Sk-15a's.
+  test('103. attaches to a valid Shadow Ghost, and its protection blocks an ability-driven removal (Sk-15 survives, everything else in the wipe does not)', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', 'Sk-25', null], hand: ['Sk-09', 'Sk-11'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-09 attaches to Shadow Ghost at slot 0
+
+    expect(G().public.field['0'][0]?.label).toBe('Sk-15'); // host unchanged, not replaced
+    expect(G().public.field['0'][0]?.attached).toEqual(['Sk-09']);
+    expect(G().secret.hands['0']).toEqual(['Sk-11']); // Sk-09 left the hand
+    expect(G().public.activeEffects).toEqual([
+      expect.objectContaining({
+        kinds: ['protectedFromRemoval'],
+        targetPid: '0',
+        targetSlot: 0,
+        sourceLabel: 'Sk-09',
+        expiresAtGlobalTurn: 2,
+      }),
+    ]);
+
+    // Trigger an ability-cause field wipe (Sk-11's own overflow effect) that
+    // would otherwise remove every own field card, Shadow Ghost included.
+    client.moves.playCard(0, 2); // Sk-11 into slot 2 — "2+ Battle Cards" gate satisfied by Sk-15 + Sk-25
+    client.moves.resolveChoice(0); // buff Sk-15 (BP7 + Sk-25's BP6 = 13, over 9)
+    client.moves.resolveChoice(true); // confirm the overflow wipe
+
+    expect(G().public.field['0'][0]?.label).toBe('Sk-15'); // protected — survives the wipe
+    expect(G().public.field['0'][0]?.currentBp).toBe(13); // the buff itself still applied; only the removal was blocked
+    expect(G().public.field['0'][1]).toBeNull(); // Sk-25 — unprotected — removed
+    expect(G().public.field['0'][2]).toBeNull(); // Sk-11 — unprotected — removed
+    expect(G().public.banished['0']).toContain('Sk-25');
+    expect(G().public.banished['0']).toContain('Sk-11');
+    expect(G().public.banished['0']).not.toContain('Sk-15');
+  });
+
+  test('104. no Shadow Ghost on the field: rejected, card stays in hand', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-09'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    expect(G().secret.hands['0']).toEqual(['Sk-09']);
+    expect(G().public.field['0']).toEqual([null, null, null]);
+  });
+
+  test('105. targeting a card that is not Shadow Ghost: rejected, card stays in hand', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', 'Sk-20', null], hand: ['Sk-09'] }, // Shadow Ghost exists, but at slot 0, not slot 1
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 1); // targets slot 1 — Sk-20, not Shadow Ghost
+
+    expect(G().secret.hands['0']).toEqual(['Sk-09']);
+    expect(G().public.field['0'][1]?.label).toBe('Sk-20'); // untouched
+    expect(G().public.field['0'][1]?.attached).toEqual([]); // nothing attached
+  });
+
+  test('106. the protection expires at its stated time, and the host is removable again', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', 'Sk-25', null], hand: ['Sk-09', 'Sk-11'], deck: ['Sk-01'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-09 attaches — expires at globalTurns 2
+    client.moves.endTurn(); // globalTurns -> 1
+    client1.moves.endTurn(); // globalTurns -> 2: expireTimedEffects prunes Sk-09's effect
+
+    expect(G().public.activeEffects).toEqual([]);
+
+    client.moves.playCard(0, 2); // Sk-11 into slot 2 (Sk-11 is still at hand index 0; the auto-draw appended Sk-01 after it)
+    client.moves.resolveChoice(0); // buff Sk-15 again
+    client.moves.resolveChoice(true); // confirm the overflow wipe
+
+    expect(G().public.field['0']).toEqual([null, null, null]); // Sk-15 is no longer protected — removed along with everything else
+    expect(G().public.banished['0']).toContain('Sk-15');
+  });
+
+  test('107. the host is removed while attached: the attached card is banished alongside it', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', null, null], hand: ['Sk-09'], turnsTaken: 1 },
+        '1': { field: ['Sk-16'] }, // BP9 — beats Shadow Ghost (BP7) as attacker
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-09 attaches
+    client.moves.attackBattleCard(0, 0); // Sk-15 attacks Sk-16 and loses (battle cause — protectedFromRemoval does not apply to battle loss)
+
+    // Sk-15b (self-hook) is unconditionally eligible for a battle-cause
+    // removal and fires first — decline it to let the removal proceed.
+    expect(G().public.pendingChoice?.sourceLabel).toBe('Sk-15');
+    client.moves.resolveChoice(false);
+
+    expect(G().public.field['0'][0]).toBeNull();
+    expect(G().public.banished['0']).toContain('Sk-15');
+    expect(G().public.banished['0']).toContain('Sk-09'); // the cleanup rule: attached cards are banished with their host
+    expect(G().public.banishedFromField['0']).toContain('Sk-09');
+  });
+
+  test('108. the protection holds against an OPPONENT-caused removal, not just an own-turn one', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { field: ['Sk-15', null, null], hand: ['Sk-09'] },
+        '1': { hand: ['Sk-05'] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-09 attaches on player 0's own turn
+    client.moves.endTurn(); // player 1's turn begins
+
+    client1.moves.playCard(0, 0); // opponent plays Sk-05 ("Remove one Battle Card from the field face-up")
+    client1.moves.resolveChoice(0); // targets Shadow Ghost — the only candidate
+
+    expect(G().public.pendingChoice).toBeNull();
+    expect(G().public.field['0'][0]?.label).toBe('Sk-15'); // protection held — the removal was prevented outright
+    expect(G().public.field['0'][0]?.attached).toEqual(['Sk-09']);
+    expect(G().public.banished['0']).not.toContain('Sk-15');
+  });
+});

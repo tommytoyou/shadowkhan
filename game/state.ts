@@ -1,6 +1,13 @@
 export interface FieldCard {
   label: string;
   currentBp: number;
+  /** Labels of cards attached to (not occupying their own field slot of)
+   *  this card — Sk-09 "used on" Shadow Ghost, or a future Sk-26 "placed
+   *  under this card". See ATTACH_TARGETS/attachCardToHost in effects.ts:
+   *  playCard's own move body branches on whether a played card's label is
+   *  registered there, rather than treating it as a normal placement.
+   *  Banished face-up alongside the host when the host itself is removed —
+   *  see finalizeFieldRemoval. */
   attached: string[];
   /** Number of this card owner's turns that have ended while this card was on the field. */
   turnsOnField: number;
@@ -33,8 +40,22 @@ export type PendingChoiceKind =
  *  the stats of) on its target. Distinct kinds (rather than one blanket
  *  "locked") so a narrow effect like Gargoyle's adjacency lock ("cannot
  *  attack") doesn't accidentally also block "be attacked" or "use card
- *  effects" the way Curse of Stone's full lock does. */
-export type EffectKind = 'cannotAttack' | 'cannotBeAttacked' | 'cannotUseEffects' | 'bpModifier';
+ *  effects" the way Curse of Stone's full lock does.
+ *
+ *  'protectedFromRemoval' (Sk-09b) is the stated-duration counterpart to
+ *  FieldCard.protectedFromBattleCardRemoval's permanent flag — same scope
+ *  (checked only for cause === 'ability' in removeFieldCard; per the
+ *  existing designer ruling "no card is unbanishable... losing an ordinary
+ *  BP battle always banishes", applied consistently to Sk-09b's "cannot be
+ *  removed by Battle Cards or card effects" the same way it already is to
+ *  Sk-15a/Sk-16b's near-identical wording), just with an expiry instead of
+ *  lasting forever. */
+export type EffectKind =
+  | 'cannotAttack'
+  | 'cannotBeAttacked'
+  | 'cannotUseEffects'
+  | 'bpModifier'
+  | 'protectedFromRemoval';
 
 /** What happens to the target's currentBp when a 'bpModifier' effect
  *  expires (or is pruned early because its source/target left the field):

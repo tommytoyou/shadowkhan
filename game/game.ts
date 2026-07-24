@@ -19,6 +19,8 @@ import {
   expireTimedEffects,
   placeCardOnField,
   resolveScheduledSummons,
+  getAttachTarget,
+  attachCardToHost,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -149,6 +151,13 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       },
     },
 
+    // `slot` means different things depending on the card: for a normal
+    // card it must be an EMPTY slot to place into; for an attach-target
+    // card (see ATTACH_TARGETS in effects.ts — currently just Sk-09) it
+    // must be an OCCUPIED slot holding a legal target to attach to instead.
+    // Same move, same two arguments, no signature churn — every existing
+    // caller (client and tests) only ever plays normal cards and is
+    // unaffected by the branch that follows.
     playCard: {
       client: false,
       move: ({ G, ctx, random, events }, handIndex: number, slot: number) => {
@@ -157,13 +166,21 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const hand = G.secret.hands[pid];
         if (handIndex < 0 || handIndex >= hand.length) return INVALID_MOVE;
         if (slot < 0 || slot >= 3) return INVALID_MOVE;
-        if (G.public.field[pid][slot] !== null) return INVALID_MOVE;
 
         const label = hand[handIndex];
         const card = CARD_BY_LABEL[label];
         if (!card) return INVALID_MOVE;
         if (!isPlayLegal(G, pid, label)) return INVALID_MOVE;
 
+        const attachTarget = getAttachTarget(label);
+        if (attachTarget) {
+          if (!attachTarget.isValidTarget(G, pid, slot)) return INVALID_MOVE;
+          hand.splice(handIndex, 1);
+          attachCardToHost(G, pid, slot, label);
+          return;
+        }
+
+        if (G.public.field[pid][slot] !== null) return INVALID_MOVE;
         hand.splice(handIndex, 1);
         placeCardOnField(G, { ctx, random, events }, pid, slot, label);
       },
