@@ -11,7 +11,7 @@ import { Client } from 'boardgame.io/client';
 import { Local } from 'boardgame.io/multiplayer';
 import { ShadowkhanGame } from '../game';
 import { CARD_BY_LABEL } from '../cards';
-import type { ActiveEffect, FieldCard, PendingChoice, ScheduledSummon, ShadowkhanG } from '../state';
+import type { ActiveEffect, FieldCard, PendingChoice, ScheduledSummon, ShadowkhanG, SkullfacePlant } from '../state';
 
 export type PlayerID = '0' | '1';
 
@@ -60,6 +60,12 @@ export interface PlayerPositionSpec {
    *  step (resolveChoice against Sk-21a's own 'a-guess' entry) in isolation,
    *  without depending on the RNG draw that would normally populate it. */
   pendingFlip?: string | null;
+  /** G.secret.skullfacePlant (see SkullfacePlant in state.ts) for this
+   *  player, i.e. THIS player as the TARGET of a planted Sk-28. Defaults to
+   *  null. Seedable so a test can exercise the draw payoff (Sk-28b) or the
+   *  timeout sweep (Sk-28c, checkSkullfacePlants) without re-deriving the
+   *  whole play-Sk-28 sequence each time. */
+  skullfacePlant?: SkullfacePlant | null;
 }
 
 export interface BoardPositionSpec {
@@ -132,6 +138,7 @@ function buildG(spec: BoardPositionSpec): ShadowkhanG {
       hands: { '0': [...hand0], '1': [...hand1] },
       scheduledSummons: { '0': [...(p0.scheduledSummons ?? [])], '1': [...(p1.scheduledSummons ?? [])] },
       pendingFlip: { '0': p0.pendingFlip ?? null, '1': p1.pendingFlip ?? null },
+      skullfacePlant: { '0': p0.skullfacePlant ?? null, '1': p1.skullfacePlant ?? null },
     },
     public: {
       deckCounts: { '0': deck0.length, '1': deck1.length },

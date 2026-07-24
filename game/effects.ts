@@ -1410,15 +1410,26 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
     },
   ],
 
-  // Sk-28 SKULLFACE: only effect a is wired — "Remove all cards in your hand
-  // and place this card in your opponent's deck." Unconditional, no target
-  // choice ("all" cards, and the card relocates itself rather than a chosen
-  // target). Implemented as: banish the whole hand face-up, pull Skullface
-  // off its own field slot, and insert it 5 cards deep into the opponent's
-  // deck. NOT implemented: effects b/c (the delayed "if they draw it within
-  // five turns" payoff) — that needs a new onDraw-style trigger plus a
-  // per-instance countdown attached to a specific card sitting in the deck,
-  // neither of which exist yet.
+  // Sk-28 SKULLFACE. Effect a: "Remove all cards in your hand and place this
+  // card in your opponent's deck." Unconditional, no target choice ("all"
+  // cards, and the card relocates itself rather than a chosen target).
+  // Implemented as: banish the whole hand face-up, pull Skullface off its
+  // own field slot, insert it 5 cards deep into the opponent's deck, and
+  // record the plant (see SkullfacePlant/checkSkullfacePlants) — globalTurns
+  // captured here, BEFORE this turn's own onEnd increment, is the basis both
+  // b (below, onDraw-triggered) and c (checkSkullfacePlants, a periodic
+  // sweep) measure their five-turn window from.
+  //
+  // Effect b: "If they draw this card in their next five turns, remove the
+  // top three cards from THEIR deck" — a plain onDraw entry, gated on the
+  // plant still being active (skullfacePlant[self.pid] non-null); onDraw's
+  // self.pid is the drawer, who can only ever be the TARGET here, since
+  // Sk-28 is only ever inserted into an OPPONENT's deck, never one's own.
+  //
+  // Effect c ("...they must remove this card face down and YOU remove the
+  // top three cards of YOUR deck") lives entirely in checkSkullfacePlants,
+  // not here — it's a turn-count timeout with no draw involved, so onDraw
+  // doesn't apply to it at all.
   'Sk-28': [
     {
       slot: 'a',
@@ -1435,10 +1446,76 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
         // doesn't go through removeFieldCard.
         G.public.field[self.pid][self.slot] = null;
         insertIntoOpponentDeck(G, opp, 'Sk-28', 4);
+        G.secret.skullfacePlant[opp] = {
+          plantedAtGlobalTurn: G.public.turnsTaken['0'] + G.public.turnsTaken['1'],
+          plantedByPid: self.pid,
+        };
+      },
+    },
+    {
+      slot: 'b',
+      trigger: 'onDraw',
+      auto: true,
+      run: ({ G, self }) => {
+        if (!G.secret.skullfacePlant[self.pid]) return;
+        G.secret.skullfacePlant[self.pid] = null;
+        removeDeckTopCards(G, self.pid, 3);
       },
     },
   ],
 };
+
+/** Removes up to `count` cards from the TOP of pid's own deck, face-up,
+ *  banishing each — stops early if the deck runs out, the same graceful
+ *  "as many as exist" handling every other top-of-deck primitive in this
+ *  file already has. Used by Sk-28b ("remove the top three cards from
+ *  THEIR deck" — the target's own) and Sk-28c ("YOU remove the top three
+ *  cards of YOUR deck" — the planter's own) — the same primitive for both,
+ *  since neither clause removes from an OPPONENT'S deck the way
+ *  removeOpponentDeckTop does; `pid` here is just whichever player the
+ *  printed text names for that clause. */
+function removeDeckTopCards(G: ShadowkhanG, pid: string, count: number): void {
+  const deck = G.secret.decks[pid];
+  for (let i = 0; i < count && deck.length > 0; i++) {
+    const label = deck.shift()!;
+    G.public.banished[pid].push(label);
+  }
+}
+
+/** Sk-28c's own periodic sweep — turn-count timeout, not a draw event, so it
+ *  is checked once per turn boundary (turn.onEnd, matching
+ *  expireTimedEffects's exact shape) rather than hooked into every
+ *  individual deck mutation. Fires once globalTurns has reached the plant's
+ *  own +10 window close (see SkullfacePlant's doc comment for the ×2-per-
+ *  "their next turn" arithmetic) with Sk-28 still unresolved.
+ *
+ *  Guards on Sk-28 STILL being physically present in the target's deck
+ *  before actually firing: several existing abilities can remove a card
+ *  from a deck (by position or by name) without that counting as "drawn" —
+ *  attackDeck, Sk-25a/Sk-14b's own "remove the top of your opponent's deck"
+ *  rewards, a future named search — and if one of those happened to take
+ *  Sk-28 out along the way, "they must remove this card face down" no
+ *  longer has a card left to remove. The printed text never addresses that
+ *  overlap; silently clearing the tracking without firing either payoff is
+ *  the conservative reading for an interaction the card was never written
+ *  for, not an invented penalty. */
+export function checkSkullfacePlants(G: ShadowkhanG): void {
+  const globalTurns = G.public.turnsTaken['0'] + G.public.turnsTaken['1'];
+  for (const targetPid of Object.keys(G.secret.skullfacePlant)) {
+    const plant = G.secret.skullfacePlant[targetPid];
+    if (!plant) continue;
+    if (globalTurns < plant.plantedAtGlobalTurn + 10) continue;
+
+    G.secret.skullfacePlant[targetPid] = null;
+    const deck = G.secret.decks[targetPid];
+    const idx = deck.indexOf('Sk-28');
+    if (idx === -1) continue;
+    deck.splice(idx, 1);
+    G.public.banishedFaceDown[targetPid]++;
+    removeDeckTopCards(G, plant.plantedByPid, 3);
+  }
+  syncCounts(G);
+}
 
 /**
  * Keeps boardgame.io's ctx.activePlayers in sync with WHOEVER currently owns
@@ -3882,6 +3959,4 @@ export interface DeferredAbility {
 
 export const DEFERRED_ABILITIES: DeferredAbility[] = [
   { label: 'Sk-01', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "Undo-by-second-copy is unreachable in a 30-card singleton deck; no second copy can exist." },
-  { label: 'Sk-28', slot: 'b', classification: 'NOT_IMPLEMENTED', reason: "onDraw now exists and would correctly fire when the opponent draws their planted copy (fireOnDraw dispatches by label regardless of whose deck the card came from), but 'within their next five turns' needs a per-instance countdown attached to that specific deck entry — decks are plain string[] with no per-card metadata slot to hold a planted-turn number. Out of scope for wiring a trigger alone." },
-  { label: 'Sk-28', slot: 'c', classification: 'NOT_IMPLEMENTED', reason: 'Same missing infrastructure as slot b — and this branch is a turn-count timeout, not a draw event, so onDraw does not apply to it at all.' },
 ];

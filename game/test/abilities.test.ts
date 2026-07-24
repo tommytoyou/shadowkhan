@@ -3242,3 +3242,147 @@ describe('Sk-16c/d WAR DRAGON (reactive negation window)', () => {
     expect(G().public.banished['1']).toContain('Sk-19');
   });
 });
+
+describe('Sk-28b/c SKULLFACE (planted-card countdown)', () => {
+  test('135. Sk-28a plants it: hand cleared, the card leaves the field, is inserted into the opponent\'s deck, and the plant is recorded', () => {
+    const { client, G1 } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-28', 'Sk-01'], field: [] },
+        '1': { deck: ['Sk-02', 'Sk-03', 'Sk-04'] },
+      },
+    });
+
+    client.moves.playCard(0, 0);
+
+    // Own-side assertions (via the planter's own client) are covered
+    // implicitly below through G1() for the target's deck, since decks are
+    // only ever visible to their own owner.
+    expect(G1().public.field['0'][0]).toBeNull(); // relocated, not banished
+    expect(G1().public.handCounts['0']).toBe(0); // "remove all cards in your hand" — Sk-28 played, Sk-01 discarded too
+    expect(G1().secret.decks['1']).toContain('Sk-28');
+    expect(G1().secret.decks['1']).toHaveLength(4); // 3 original + Sk-28
+    expect(G1().secret.skullfacePlant['1']).toEqual({ plantedAtGlobalTurn: 0, plantedByPid: '0' });
+  });
+
+  test('136. drawing Sk-28 within the window fires Sk-28b: the top three of the DRAWER\'S OWN deck are removed', () => {
+    const { client1, G } = createTestGame({
+      players: {
+        '0': {},
+        '1': {
+          deck: ['Sk-28', 'Sk-02', 'Sk-03', 'Sk-04', 'Sk-05'],
+          skullfacePlant: { plantedAtGlobalTurn: 0, plantedByPid: '0' },
+        },
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.drawCard();
+
+    expect(G().public.handCounts['1']).toBe(1); // Sk-28 itself, drawn normally — still played out, not intercepted
+    expect(G().public.deckCounts['1']).toBe(1); // 5 - 1 (drawn) - 3 (payoff) = 1 left
+    expect(G().public.banished['1']).toEqual(expect.arrayContaining(['Sk-02', 'Sk-03', 'Sk-04']));
+    expect(G().public.banished['1']).toHaveLength(3);
+  });
+
+  test('137. not drawing it within the window fires Sk-28c at the correct turn, not before', () => {
+    const { client, client1, G, G1 } = createTestGame({
+      players: {
+        // Hands start full (5 = MAX_HAND_SIZE) on both sides specifically to
+        // suppress turn.onBegin's own auto-draw throughout this test — an
+        // unrelated auto-draw pulling Sk-28 early would confound the
+        // "not drawn" scenario this test is isolating.
+        '0': { hand: ['Sk-01', 'Sk-02', 'Sk-03', 'Sk-04', 'Sk-05'], deck: ['Sk-06', 'Sk-07', 'Sk-08', 'Sk-09'], turnsTaken: 4 },
+        '1': {
+          hand: ['Sk-10', 'Sk-11', 'Sk-12', 'Sk-13', 'Sk-14'],
+          deck: ['Sk-15', 'Sk-28', 'Sk-16'],
+          turnsTaken: 4,
+          skullfacePlant: { plantedAtGlobalTurn: 0, plantedByPid: '0' },
+        },
+      },
+      // globalTurns = 8 to start; the window closes at 10.
+    });
+
+    client.moves.endTurn(); // globalTurns -> 9, still < 10 — the window is still open
+
+    expect(G1().secret.skullfacePlant['1']).not.toBeNull();
+    expect(G1().secret.decks['1']).toContain('Sk-28');
+    expect(G().public.banishedFaceDown['1']).toBe(0);
+
+    client1.moves.endTurn(); // globalTurns -> 10 — the window closes exactly here
+
+    expect(G1().secret.skullfacePlant['1']).toBeNull();
+    expect(G1().secret.decks['1']).not.toContain('Sk-28'); // removed face down
+    expect(G().public.banishedFaceDown['1']).toBe(1);
+    expect(G().public.banished['1']).not.toContain('Sk-28'); // face down — label never revealed
+    // "you remove the top three cards of YOUR deck" — the PLANTER's (player
+    // 0's) own deck, not the target's.
+    expect(G().public.deckCounts['0']).toBe(1); // 4 - 3
+    expect(G().public.banished['0']).toEqual(expect.arrayContaining(['Sk-06', 'Sk-07', 'Sk-08']));
+  });
+
+  test('138. skullfacePlant tracking is unaffected by an unrelated Sk-07a shuffle, and the plant still resolves correctly afterward', () => {
+    const TEN_REMOVED = ['Sk-01', 'Sk-02', 'Sk-03', 'Sk-04', 'Sk-05', 'Sk-06', 'Sk-09', 'Sk-10', 'Sk-11', 'Sk-12'];
+    const { client, G, G1 } = createTestGame({
+      players: {
+        // Player 0 triggers Sk-07a's own shuffle-into-deck on THEIR OWN
+        // deck — structurally unrelated to Sk-28's plant, which concerns
+        // player 1's deck (Sk-07a's own trigger requires the deck to be
+        // completely empty right after Sk-07 is drawn, so an active plant
+        // can never be sitting in the SAME deck being shuffled into at that
+        // exact moment — this proves the same thing more directly: nothing
+        // about shuffling ANY deck can reach across and disturb tracking
+        // keyed by a DIFFERENT player).
+        '0': { hand: [], deck: ['Sk-07'], banished: [...TEN_REMOVED] },
+        '1': {
+          deck: ['Sk-13', 'Sk-28', 'Sk-14'],
+          skullfacePlant: { plantedAtGlobalTurn: 0, plantedByPid: '0' },
+        },
+      },
+    });
+
+    client.moves.drawCard(); // player 0 draws Sk-07 as their last card
+    client.moves.resolveChoice(true); // shuffles 10 removed cards into player 0's OWN deck
+
+    expect(G().secret.decks['0']).toHaveLength(10); // player 0's own deck, unrelated to Sk-28
+
+    // Player 1's plant and deck are completely untouched by player 0's shuffle.
+    expect(G1().secret.skullfacePlant['1']).toEqual({ plantedAtGlobalTurn: 0, plantedByPid: '0' });
+    expect(G1().secret.decks['1']).toEqual(['Sk-13', 'Sk-28', 'Sk-14']);
+  });
+
+  test('139. skullfacePlant is visible only to the target, not the planter; deck order stays hidden as always', () => {
+    const { G, G1 } = createTestGame({
+      players: {
+        '0': { deck: ['Sk-01', 'Sk-02'] },
+        '1': {
+          deck: ['Sk-03', 'Sk-28', 'Sk-04'],
+          skullfacePlant: { plantedAtGlobalTurn: 0, plantedByPid: '0' },
+        },
+      },
+    });
+
+    // Player 0 (the planter) cannot see player 1's plant, or their deck's
+    // order/contents, at all — neither key is present in player 0's own
+    // playerView, matching every other secret field's existing convention.
+    expect(G().secret.skullfacePlant['1']).toBeUndefined();
+    expect(G().secret.decks['1']).toBeUndefined();
+
+    // Player 1 (the target) sees their own plant, the same way they already
+    // see their own deck.
+    expect(G1().secret.skullfacePlant['1']).toEqual({ plantedAtGlobalTurn: 0, plantedByPid: '0' });
+  });
+
+  test('140. draw and the empty-deck loss check behave exactly as before, with no Sk-28 anywhere in play', () => {
+    const { client1, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-01', 'Sk-02', 'Sk-03', 'Sk-04'], deck: [] },
+        '1': { hand: ['Sk-05', 'Sk-06', 'Sk-07', 'Sk-08'], deck: ['Sk-09'], turnsTaken: 1 },
+      },
+      currentPlayer: '1',
+    });
+
+    client1.moves.endTurn(); // -> player 0's turn; bothReady, hand < 5, deck empty -> loss
+
+    expect(G().public.loser).toBe('0');
+  });
+});

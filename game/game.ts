@@ -24,6 +24,7 @@ import {
   offerSk21Gambit,
   resolveBattleOutcome,
   offerSk16Negation,
+  checkSkullfacePlants,
 } from './effects';
 
 const ALL_LABELS = CARDS.map((c) => c.label);
@@ -61,6 +62,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         hands: { '0': hand0, '1': hand1 },
         scheduledSummons: { '0': [], '1': [] },
         pendingFlip: { '0': null, '1': null },
+        skullfacePlant: { '0': null, '1': null },
       },
       public: {
         deckCounts: { '0': 0, '1': 0 },
@@ -85,7 +87,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
 
   playerView: ({ G, playerID }) => {
     if (playerID === null || playerID === undefined) {
-      return { ...G, secret: { decks: {}, hands: {}, scheduledSummons: {}, pendingFlip: {} } };
+      return { ...G, secret: { decks: {}, hands: {}, scheduledSummons: {}, pendingFlip: {}, skullfacePlant: {} } };
     }
     return {
       ...G,
@@ -96,6 +98,9 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         // Never exposed to any client, including its own owner — see
         // SecretState.pendingFlip.
         pendingFlip: {},
+        // Visible only to the player whose deck it concerns (the TARGET),
+        // same as decks/hands/scheduledSummons — see SecretState.skullfacePlant.
+        skullfacePlant: { [playerID]: G.secret.skullfacePlant[playerID] ?? null },
       },
     };
   },
@@ -144,6 +149,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       }
       expireTimedEffects(G);
       checkCopyIdentityIntegrity(G, { ctx, random, events });
+      checkSkullfacePlants(G);
     },
   },
 

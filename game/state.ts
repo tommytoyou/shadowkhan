@@ -175,11 +175,58 @@ export interface PendingChoice {
   };
 }
 
+/** Sk-28 SKULLFACE: "Remove all cards in your hand and place this card in
+ *  your opponent's deck. If they draw this card in their next five turns,
+ *  remove the top three cards from their deck. If they do not draw this
+ *  card in their next five turns, they must remove this card face down and
+ *  you remove the top three cards of your deck." Tracks whether a plant is
+ *  currently active WITHOUT tying it to a deck array position at all — see
+ *  SecretState.skullfacePlant's own doc comment for why. */
+export interface SkullfacePlant {
+  /** globalTurns (turnsTaken['0'] + turnsTaken['1']) at the moment Sk-28a
+   *  planted it, captured BEFORE the planting turn's own onEnd increment —
+   *  the same globalTurns basis expireTimedEffects/resolveScheduledSummons
+   *  already use, not a second counting scheme. "Their next five turns" is
+   *  five of the TARGET's own turns; in this game's strict two-player
+   *  alternation that's 10 total turn-End events (one of the target's, one
+   *  of the planter's, five times over) — the same ×2-per-"next turn"
+   *  reading Sk-06's own "at the start of your next turn" (+2) already
+   *  established, just five iterations of it instead of one. The window is
+   *  open through globalTurns === plantedAtGlobalTurn + 10 inclusive (the
+   *  target's 5th turn still counts) and closed once globalTurns reaches
+   *  that value at a turn.onEnd sweep with nothing drawn. */
+  plantedAtGlobalTurn: number;
+  /** Who planted it — needed for Sk-28c's "YOU remove the top three cards
+   *  of YOUR deck," which is the PLANTER's own deck, not the target's
+   *  (asymmetric from Sk-28b's payoff, which hits the target's own deck). */
+  plantedByPid: string;
+}
+
 export interface SecretState {
   decks: Record<string, string[]>;
   hands: Record<string, string[]>;
   /** See ScheduledSummon. Keyed by owner, same shape as decks/hands. */
   scheduledSummons: Record<string, ScheduledSummon[]>;
+  /** See SkullfacePlant. Keyed by the TARGET (whose deck Sk-28 currently sits
+   *  in) — null when no plant is active for that player. Deliberately NOT a
+   *  parallel array keyed by deck position: decks are plain string[] and are
+   *  spliced/shifted/pushed from roughly two dozen call sites across this
+   *  file and game.ts (search, draw, attack-the-deck, Sk-07a's shuffle,
+   *  Sk-30a's guardian redirect, and more); a position-keyed structure would
+   *  have to move in exact lockstep with every one of them or silently
+   *  attach to the wrong card. What Sk-28b/c actually need to know — is a
+   *  plant active, when was it planted, by whom — has no dependency on WHERE
+   *  in the deck Sk-28 currently sits, so tracking it by deck OWNER instead
+   *  sidesteps the whole problem: none of those two dozen sites need to
+   *  change, and reordering the deck (a shuffle, bottomUp, anything) cannot
+   *  desync this by construction, since there's no position for it to lose
+   *  track of. Visible only to its own key's player, via playerView, same as
+   *  decks/hands/scheduledSummons — Sk-28 itself is already visible to
+   *  whoever's deck it's sitting in (decks are visible to their own owner in
+   *  this engine), and nothing in the text says this tracking is hidden from
+   *  them too; the OPPONENT (planter) never sees it, matching how nothing
+   *  else in SecretState is keyed-and-shared across both players either. */
+  skullfacePlant: Record<string, SkullfacePlant | null>;
   /** Sk-21a SAND SQUID: "shuffle [opponent's Battle Cards] face-down. Flip
    *  the top card face-up, and if you call it correctly..." — the hidden
    *  result of that flip, keyed by the GUESSER's own pid, set the instant
