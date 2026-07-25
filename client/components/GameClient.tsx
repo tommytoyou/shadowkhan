@@ -8,7 +8,7 @@ import Board from './Board';
 const ShadowkhanClient = Client({
   game: ShadowkhanGame,
   board: Board,
-  multiplayer: SocketIO({ server: 'http://localhost:8000' }),
+  multiplayer: SocketIO({ server: process.env.NEXT_PUBLIC_SERVER_URL ?? 'http://localhost:8000' }),
   debug: false,
 });
 

@@ -1,0 +1,5 @@
+{
+  "installCommand": "npm install",
+  "buildCommand": "npm run build -w @shadowkhan/game && npm run build -w @shadowkhan/client",
+  "outputDirectory": "client/.next"
+}

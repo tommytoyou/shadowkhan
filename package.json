@@ -10,6 +10,8 @@
     "dev:client": "npm run dev -w @shadowkhan/client",
     "dev:server": "npm run dev -w @shadowkhan/server",
     "build": "npm run build -w @shadowkhan/game && npm run build -w @shadowkhan/client",
+    "build:server": "npm run build -w @shadowkhan/game && npm run build -w @shadowkhan/server",
+    "start:server": "npm run start -w @shadowkhan/server",
     "test": "vitest run"
   },
   "devDependencies": {
