@@ -15,6 +15,8 @@ const OPP_HAND_CAP = 8;
  *  content fills it. */
 const SLOT_BOX = 'aspect-[2.5/3.5] w-44 shrink-0';
 
+const HELP_EYEBROW = 'text-[10px] uppercase tracking-[0.15em] text-sk-slate';
+
 const LOG_CAP = 50;
 /** Kept in step with the .sk-slot-vanish animation in globals.css. */
 const GHOST_MS = 300;
@@ -320,6 +322,53 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
     if (gameOver) endScreenRef.current?.focus();
   }, [gameOver]);
 
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpSeen, setHelpSeen] = useState(false);
+  const helpRef = useRef<HTMLDivElement>(null);
+  const helpTriggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (helpOpen) helpRef.current?.focus();
+  }, [helpOpen]);
+
+  function openHelp() {
+    setHelpSeen(true);
+    setHelpOpen(true);
+  }
+
+  function closeHelp() {
+    setHelpOpen(false);
+    helpTriggerRef.current?.focus(); // send focus back where it came from
+  }
+
+  /** Escape closes; Tab cycles within the panel so focus cannot wander onto
+   *  the board behind it. */
+  function handleHelpKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      closeHelp();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+
+    const root = helpRef.current;
+    if (!root) return;
+    const stops = root.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    if (stops.length === 0) return;
+
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   const [log, setLog] = useState<{ id: number; text: string }[]>([]);
   const [ghosts, setGhosts] = useState<(Vanished & { id: number })[]>([]);
   const prevSnapRef = useRef<Snapshot | null>(null);
@@ -602,18 +651,34 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
             </p>
           </div>
 
-          <dl className="flex items-center gap-8">
-            <div>
-              <dt className="text-[10px] uppercase tracking-[0.15em] text-sk-slate">Attack</dt>
-              <dd className="text-sm text-white">{attackedThisTurn ? 'Used' : 'Available'}</dd>
+          <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
+            <dl className="flex items-center gap-8">
+              <div>
+                <dt className="text-[10px] uppercase tracking-[0.15em] text-sk-slate">Attack</dt>
+                <dd className="text-sm text-white">{attackedThisTurn ? 'Used' : 'Available'}</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-[0.15em] text-sk-slate">Turns taken</dt>
+                <dd className="text-sm text-white">
+                  You {G.public.turnsTaken[pid] ?? 0} · Opponent {G.public.turnsTaken[opp] ?? 0}
+                </dd>
+              </div>
+            </dl>
+
+            <div className="flex flex-col items-start gap-1">
+              <button
+                ref={helpTriggerRef}
+                type="button"
+                onClick={openHelp}
+                className={`rounded border border-sk-slate/50 px-3 py-1.5 text-xs text-sk-slate transition hover:border-sk-slate hover:text-white ${BTN_FOCUS}`}
+              >
+                How to play
+              </button>
+              {!helpSeen && (
+                <p className="text-[10px] text-sk-slate">New here? Start here.</p>
+              )}
             </div>
-            <div>
-              <dt className="text-[10px] uppercase tracking-[0.15em] text-sk-slate">Turns taken</dt>
-              <dd className="text-sm text-white">
-                You {G.public.turnsTaken[pid] ?? 0} · Opponent {G.public.turnsTaken[opp] ?? 0}
-              </dd>
-            </div>
-          </dl>
+          </div>
         </header>
 
         {/* OPPONENT ZONE */}
@@ -888,6 +953,138 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
           </div>
         </section>
       </div>
+
+      {/* HOW TO PLAY — sits above the end screen so it stays reachable once
+          the game is over. */}
+      {helpOpen && (
+        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/80 px-4 py-8 backdrop-blur-sm">
+          <div
+            ref={helpRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="help-title"
+            tabIndex={-1}
+            onKeyDown={handleHelpKeyDown}
+            className="w-full max-w-lg rounded-xl border-2 border-sk-slate bg-black px-7 py-8 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            <h2
+              id="help-title"
+              className="font-[family-name:var(--font-heading)] text-3xl uppercase tracking-[0.15em] text-white"
+            >
+              How to play
+            </h2>
+            <span className="mt-4 block h-1 w-16 bg-sk-red" aria-hidden="true" />
+
+            <section className="mt-7">
+              <h3 className={HELP_EYEBROW}>The goal</h3>
+              <p className="mt-1.5 text-sm text-white">
+                Your deck is your life. You lose the moment one of your turns starts and your
+                deck has no card left to draw — so win by stripping your opponent&apos;s deck
+                before they strip yours.
+              </p>
+            </section>
+
+            <section className="mt-6">
+              <h3 className={HELP_EYEBROW}>Your turn</h3>
+              {/* Numbered because the turn genuinely is a sequence. */}
+              <ol className="mt-1.5 space-y-1 text-sm text-sk-slate">
+                <li>
+                  <span className="text-white">1.</span> A card is drawn for you automatically at
+                  the start of your turn, once both players have taken one turn and you hold
+                  fewer than 5 cards.
+                </li>
+                <li>
+                  <span className="text-white">2.</span> Play cards to your field and make up to
+                  one attack.
+                </li>
+                <li>
+                  <span className="text-white">3.</span> Click{' '}
+                  <span className="text-white">End turn</span>.
+                </li>
+              </ol>
+            </section>
+
+            <section className="mt-6">
+              <h3 className={HELP_EYEBROW}>Playing a card</h3>
+              <p className="mt-1.5 text-sm text-sk-slate">
+                Click a card in your hand, then click one of your three empty field slots.
+              </p>
+            </section>
+
+            <section className="mt-6">
+              <h3 className={HELP_EYEBROW}>Attacking</h3>
+              <p className="mt-1.5 text-sm text-sk-slate">
+                One attack per turn, and never on your first turn. Click one of your field
+                cards, then pick a target:
+              </p>
+              <ul className="mt-2 space-y-1.5 text-sm text-sk-slate">
+                <li>
+                  <span className="text-white">Their field card.</span> Higher BP wins and the
+                  loser&apos;s card is removed. On a tie, both players lose their top deck card
+                  face-down.
+                </li>
+                <li>
+                  <span className="text-white">Attack hand.</span> Hits a card in their hand at
+                  random. To aim at a position instead, click one of their face-down hand cards.
+                </li>
+                <li>
+                  <span className="text-white">Attack deck.</span> Hits the top card of their
+                  deck.
+                </li>
+              </ul>
+            </section>
+
+            <section className="mt-6">
+              <h3 className={HELP_EYEBROW}>The other controls</h3>
+              <dl className="mt-1.5 space-y-1.5 text-sm text-sk-slate">
+                <div>
+                  <dt className="inline text-white">Draw card. </dt>
+                  <dd className="inline">Take one more card, up to a hand of 5.</dd>
+                </div>
+                <div>
+                  <dt className="inline text-white">Bottom-up. </dt>
+                  <dd className="inline">
+                    Moves the bottom card of your deck to the top. Once per game, and only with
+                    10 or fewer cards left.
+                  </dd>
+                </div>
+                <div>
+                  <dt className="inline text-white">Banish. </dt>
+                  <dd className="inline">
+                    Sends the selected hand card to your own banished pile, face up.
+                  </dd>
+                </div>
+              </dl>
+            </section>
+
+            <section className="mt-6">
+              <h3 className={HELP_EYEBROW}>Reading the board</h3>
+              <ul className="mt-1.5 space-y-1.5 text-sm text-sk-slate">
+                <li>
+                  The number on a field card is its <span className="text-white">BP</span> — what
+                  battles are decided by.
+                </li>
+                <li>
+                  <span className="text-white">Banished</span> counts cards removed face up, so
+                  both players know them.{' '}
+                  <span className="text-white">Face-down</span> counts cards removed without
+                  being revealed — you only get the number.
+                </li>
+                <li>
+                  <span className="text-white">A, B, C and D</span> on a card are its printed
+                  abilities.
+                </li>
+              </ul>
+            </section>
+
+            <div className="mt-8 flex justify-end">
+              <button type="button" onClick={closeHelp} className={BTN_PRIMARY}>
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* END SCREEN — the board stays readable behind a dimmed, blurred
           backdrop, so the final position can still be seen. */}
