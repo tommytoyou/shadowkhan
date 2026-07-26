@@ -12,7 +12,24 @@ const OPP_HAND_CAP = 8;
 const EMPTY_SLOT_BOX = 'h-16 w-12 rounded-md';
 const FILLED_SLOT_BOX = 'aspect-[2.5/3.5] w-44 shrink-0 rounded-lg';
 
-export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
+const BTN_FOCUS =
+  'focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white';
+
+/** Disabled controls drop the white label and let the slate outline fade out,
+ *  rather than dimming the whole button with opacity alone — at opacity-50 a
+ *  thin slate outline on black stayed close enough to the enabled state to be
+ *  misread. Disabled controls are exempt from the WCAG contrast minimums, so
+ *  the low ratio here is the signal, not a regression. */
+const BTN_DISABLED =
+  'disabled:cursor-not-allowed disabled:border-sk-slate/25 disabled:bg-transparent disabled:text-sk-slate/60';
+
+const BTN_SECONDARY = `rounded border border-sk-slate px-3 py-1.5 text-sm text-white transition enabled:hover:bg-sk-slate/15 ${BTN_FOCUS} ${BTN_DISABLED}`;
+
+/** End turn stays the primary action, but the emphasis is carried by the white
+ *  fill (black-on-white, 21:1); sk-red is only the frame around it. */
+const BTN_PRIMARY = `rounded border-2 border-sk-red bg-white px-4 py-1.5 text-sm font-bold text-black transition enabled:hover:bg-white/85 ${BTN_FOCUS} ${BTN_DISABLED}`;
+
+export default function Board({ G, moves, playerID, isActive }: Props) {
   const [selectedHandIndex, setSelectedHandIndex] = useState<number | null>(null);
   const [selectedFieldSlot, setSelectedFieldSlot] = useState<number | null>(null);
 
@@ -67,8 +84,39 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
   const attackDeckDisabled = !canAttackHandOrDeck || oppDeckCount === 0;
   const attackDeckTitle = attackDisabledReason(oppDeckCount === 0, 'deck');
 
+  /** The gate every turn-scoped control shares. Wording matches
+   *  attackDisabledReason so one condition reads the same on every button. */
+  function turnDisabledReason(): string | undefined {
+    if (!isActive) return 'Not your turn';
+    if (choiceActive) return 'Resolve the pending choice first';
+    return undefined;
+  }
+
+  // Reasons for the remaining gated buttons, read straight off the same
+  // conditions their `disabled` props use — no new rules.
+  const drawTitle = turnDisabledReason();
+  const endTurnTitle = turnDisabledReason();
+  const bottomUpTitle =
+    turnDisabledReason() ??
+    (bottomUpUsed
+      ? 'Bottom-up is once per game — you have already used it'
+      : ownDeckCount > 10
+        ? 'Bottom-up needs 10 or fewer cards left in your deck'
+        : undefined);
+  const banishTitle =
+    turnDisabledReason() ??
+    (selectedHandIndex === null ? 'Select a hand card to banish' : undefined);
+
   // Subtle "what can I do next" guidance — additive only, no move-logic impact.
   const suggestHand = isActive && selectedHandIndex === null && selectedFieldSlot === null;
+
+  const gameOver = G.public.loser !== null;
+  /** Drives the banner, the own-zone frame and the accent bar together, so the
+   *  board reads as "mine to act on" from one flag. Game over is called out
+   *  separately: after endIf fires isActive is false for BOTH players, which a
+   *  bare "Opponent's turn" would misreport. */
+  const myTurn = isActive && !gameOver;
+  const turnHeadline = gameOver ? 'Game over' : isActive ? 'Your turn' : "Opponent's turn";
 
   function clearSelection() {
     setSelectedHandIndex(null);
@@ -194,7 +242,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
             aria-label={`Empty field slot ${slot + 1}${
               canPlaceHere ? ' - play selected card here' : ''
             }`}
-            className={`${EMPTY_SLOT_BOX} border border-sk-slate/30 bg-transparent transition disabled:opacity-40 ${
+            className={`${EMPTY_SLOT_BOX} border border-sk-slate/30 bg-transparent transition disabled:cursor-not-allowed disabled:opacity-40 ${
               canPlaceHere ? 'ring-1 ring-sk-slate' : ''
             }`}
           />
@@ -225,7 +273,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
           aria-label={`Your field card in slot ${slot + 1}, BP ${card.currentBp}${
             isChoiceTarget ? ', valid target for pending choice — click to choose' : isSelected ? ', selected' : ''
           }`}
-          className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
+          className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
             isChoiceTarget
               ? 'border-sk-red ring-2 ring-sk-red'
               : isSelected
@@ -254,7 +302,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
         aria-label={`${isChoiceTarget ? 'Valid target for pending choice — choose ' : 'Attack '}opponent field card in slot ${
           slot + 1
         }, BP ${card.currentBp}`}
-        className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
+        className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
           isChoiceTarget ? 'border-sk-red ring-2 ring-sk-red' : 'border-sk-slate'
         }`}
       >
@@ -283,6 +331,42 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
   return (
     <div className="min-h-screen w-full flex flex-col bg-black text-white">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
+        {/* TURN BANNER */}
+        <header
+          aria-label="Turn status"
+          className={`flex flex-wrap items-center justify-between gap-x-8 gap-y-4 rounded-lg border-2 px-5 py-4 transition ${
+            myTurn ? 'border-sk-slate bg-sk-slate/10' : 'border-sk-slate/30'
+          }`}
+        >
+          <div className="flex items-center gap-4">
+            <span
+              aria-hidden="true"
+              className={`h-9 w-1.5 shrink-0 rounded-full ${myTurn ? 'bg-white' : 'bg-sk-slate/40'}`}
+            />
+            <p
+              aria-live="polite"
+              className={`font-[family-name:var(--font-heading)] text-3xl uppercase tracking-[0.18em] sm:text-4xl ${
+                myTurn ? 'text-white' : 'text-sk-slate'
+              }`}
+            >
+              {turnHeadline}
+            </p>
+          </div>
+
+          <dl className="flex items-center gap-8">
+            <div>
+              <dt className="text-[10px] uppercase tracking-[0.15em] text-sk-slate">Attack</dt>
+              <dd className="text-sm text-white">{attackedThisTurn ? 'Used' : 'Available'}</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] uppercase tracking-[0.15em] text-sk-slate">Turns taken</dt>
+              <dd className="text-sm text-white">
+                You {G.public.turnsTaken[pid] ?? 0} · Opponent {G.public.turnsTaken[opp] ?? 0}
+              </dd>
+            </div>
+          </dl>
+        </header>
+
         {/* OPPONENT ZONE */}
         <section
           aria-label="Opponent zone"
@@ -301,7 +385,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
                   aria-label={`${
                     isChoiceTarget ? 'Valid target for pending choice — choose ' : 'Attack '
                   }opponent hand card ${i + 1}`}
-                  className={`w-20 shrink-0 rounded disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
+                  className={`w-20 shrink-0 rounded disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
                     isChoiceTarget ? 'ring-2 ring-sk-red' : ''
                   }`}
                 >
@@ -341,12 +425,6 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
           aria-label="Game status and controls"
           className="flex flex-col items-center gap-2 border-b border-sk-red/60 pb-8 text-center"
         >
-          <p className="text-sm">
-            Turn: Player {ctx.currentPlayer} {isActive ? '(your turn)' : '(waiting)'} · Attacked:{' '}
-            {attackedThisTurn ? 'yes' : 'no'} · Turns — You {G.public.turnsTaken[pid] ?? 0} / Opp{' '}
-            {G.public.turnsTaken[opp] ?? 0}
-          </p>
-
           {G.public.loser !== null ? (
             <p className="text-xl font-bold text-white">
               Player {G.public.loser === '0' ? '1' : '0'} wins — Player {G.public.loser} ran out
@@ -412,7 +490,8 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
               onClick={handleDrawCard}
               disabled={!isActive || choiceActive}
               aria-label="Draw a card"
-              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+              title={drawTitle}
+              className={BTN_SECONDARY}
             >
               Draw card
             </button>
@@ -421,7 +500,8 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
               onClick={handleBottomUp}
               disabled={!isActive || choiceActive || bottomUpUsed || ownDeckCount > 10}
               aria-label="Move bottom card of deck to top"
-              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+              title={bottomUpTitle}
+              className={BTN_SECONDARY}
             >
               Bottom-up
             </button>
@@ -431,7 +511,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
               disabled={attackHandDisabled}
               aria-label="Attack a random opponent hand card"
               title={attackHandTitle}
-              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+              className={BTN_SECONDARY}
             >
               Attack hand
             </button>
@@ -441,7 +521,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
               disabled={attackDeckDisabled}
               aria-label="Attack opponent deck"
               title={attackDeckTitle}
-              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+              className={BTN_SECONDARY}
             >
               Attack deck
             </button>
@@ -450,7 +530,8 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
               onClick={handleBanishFromHand}
               disabled={!isActive || choiceActive || selectedHandIndex === null}
               aria-label="Banish selected hand card to banished pile"
-              className="rounded border border-sk-slate px-3 py-1 text-sm disabled:opacity-50"
+              title={banishTitle}
+              className={BTN_SECONDARY}
             >
               Banish
             </button>
@@ -459,15 +540,22 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
               onClick={handleEndTurn}
               disabled={!isActive || choiceActive}
               aria-label="End turn"
-              className="rounded border-2 border-sk-red px-3 py-1 text-sm font-bold disabled:opacity-50"
+              title={endTurnTitle}
+              className={BTN_PRIMARY}
             >
               End turn
             </button>
           </div>
         </section>
 
-        {/* OWN ZONE */}
-        <section aria-label="Your zone" className="flex flex-col items-center gap-5 pb-4">
+        {/* OWN ZONE — the frame lights up only while it is this player's turn,
+            so turn ownership is legible from the board itself, not just the banner. */}
+        <section
+          aria-label="Your zone"
+          className={`flex flex-col items-center gap-5 rounded-xl border-2 px-3 py-4 transition ${
+            myTurn ? 'border-sk-slate bg-sk-slate/[0.06]' : 'border-transparent'
+          }`}
+        >
           <div className="flex flex-row flex-nowrap w-full items-center justify-between gap-4">
             <div className="flex flex-col items-center flex-none">
               <div className="relative w-20">
@@ -505,7 +593,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }: Props) {
                   aria-label={`Your hand card ${i + 1}: ${label}${
                     isSelected ? ', selected' : ''
                   }`}
-                  className={`aspect-[2.5/3.5] w-44 shrink-0 overflow-hidden rounded-lg border-2 bg-neutral-950 transition disabled:opacity-50 ${
+                  className={`aspect-[2.5/3.5] w-44 shrink-0 overflow-hidden rounded-lg border-2 bg-neutral-950 transition disabled:cursor-not-allowed disabled:opacity-50 ${
                     isSelected
                       ? 'border-white ring-2 ring-white'
                       : suggestHand
