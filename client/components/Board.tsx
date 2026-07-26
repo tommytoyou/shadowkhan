@@ -9,8 +9,182 @@ import CardBack from './CardBack';
 type Props = BoardProps<ShadowkhanG>;
 
 const OPP_HAND_CAP = 8;
-const EMPTY_SLOT_BOX = 'h-16 w-12 rounded-md';
-const FILLED_SLOT_BOX = 'aspect-[2.5/3.5] w-44 shrink-0 rounded-lg';
+
+/** One footprint for every field slot, empty or filled, so a removal never
+ *  collapses the row and shifts its neighbours. Sizing only — the slot's own
+ *  content fills it. */
+const SLOT_BOX = 'aspect-[2.5/3.5] w-44 shrink-0';
+
+const LOG_CAP = 50;
+/** Kept in step with the .sk-slot-vanish animation in globals.css. */
+const GHOST_MS = 300;
+
+type Side = 'own' | 'opp';
+const SIDES: readonly Side[] = ['own', 'opp'];
+const WHO: Record<Side, string> = { own: 'You', opp: 'Opponent' };
+const THEIR: Record<Side, string> = { own: 'your', opp: 'their' };
+const other = (side: Side): Side => (side === 'own' ? 'opp' : 'own');
+const plural = (n: number) => (n === 1 ? '' : 's');
+
+/** Everything the log and the removal cue are derived from — all of it public
+ *  state, so it reads the same on both clients. */
+type Snapshot = {
+  field: Record<Side, (string | null)[]>;
+  banished: Record<Side, string[]>;
+  faceDown: Record<Side, number>;
+  deck: Record<Side, number>;
+  hand: Record<Side, number>;
+  turns: Record<Side, number>;
+  loser: string | null;
+};
+
+type Vanished = { side: Side; slot: number; label: string };
+
+function takeSnapshot(G: ShadowkhanG, pid: string, opp: string): Snapshot {
+  const per = <T,>(read: (p: string) => T): Record<Side, T> => ({
+    own: read(pid),
+    opp: read(opp),
+  });
+  return {
+    field: per((p) => (G.public.field[p] ?? [null, null, null]).map((c) => c?.label ?? null)),
+    banished: per((p) => [...(G.public.banished[p] ?? [])]),
+    faceDown: per((p) => G.public.banishedFaceDown[p] ?? 0),
+    deck: per((p) => G.public.deckCounts[p] ?? 0),
+    hand: per((p) => G.public.handCounts[p] ?? 0),
+    turns: per((p) => G.public.turnsTaken[p] ?? 0),
+    loser: G.public.loser ?? null,
+  };
+}
+
+/** Banished piles are mostly append-only but some effects splice cards back
+ *  out, so compare as multisets rather than trusting order or length. */
+function multisetDiff(before: string[], after: string[]) {
+  const counts = new Map<string, number>();
+  for (const label of before) counts.set(label, (counts.get(label) ?? 0) + 1);
+  const added: string[] = [];
+  for (const label of after) {
+    const n = counts.get(label) ?? 0;
+    if (n > 0) counts.set(label, n - 1);
+    else added.push(label);
+  }
+  const removed: string[] = [];
+  for (const [label, n] of counts) for (let i = 0; i < n; i++) removed.push(label);
+  return { added, removed };
+}
+
+function consume(pool: string[], label: string): boolean {
+  const at = pool.indexOf(label);
+  if (at === -1) return false;
+  pool.splice(at, 1);
+  return true;
+}
+
+/** Turns two snapshots into log lines plus the slots that need an exit cue.
+ *  Every claim here is something public state actually supports; where it does
+ *  not (why a card left, what a hand card was) the wording stays coarse. */
+function diffSnapshots(
+  prev: Snapshot,
+  next: Snapshot,
+  pid: string,
+): { events: string[]; vanished: Vanished[] } {
+  const events: string[] = [];
+  const vanished: Vanished[] = [];
+
+  const pile: Record<Side, ReturnType<typeof multisetDiff>> = {
+    own: multisetDiff(prev.banished.own, next.banished.own),
+    opp: multisetDiff(prev.banished.opp, next.banished.opp),
+  };
+  const faceDown: Record<Side, number> = {
+    own: next.faceDown.own - prev.faceDown.own,
+    opp: next.faceDown.opp - prev.faceDown.opp,
+  };
+  const arrivals: Record<Side, number> = { own: 0, opp: 0 };
+
+  /** Where a card that just left the field ended up. Owner's pile first, then
+   *  the opponent's (several effects banish into the attacker's pile). */
+  function destination(label: string, side: Side): string {
+    if (consume(pile[side].added, label)) return `banished to ${THEIR[side]} pile`;
+    const away = other(side);
+    if (consume(pile[away].added, label)) return `banished to ${THEIR[away]} pile`;
+    if (faceDown[side] > 0) {
+      faceDown[side] -= 1;
+      return 'banished face-down';
+    }
+    return 'removed';
+  }
+
+  for (const side of SIDES) {
+    for (let slot = 0; slot < 3; slot++) {
+      const before = prev.field[side][slot];
+      const after = next.field[side][slot];
+      if (before === after) continue;
+
+      if (before === null && after !== null) {
+        arrivals[side] += 1;
+        events.push(`${WHO[side]} played ${after} to slot ${slot + 1}.`);
+      } else if (before !== null && after === null) {
+        vanished.push({ side, slot, label: before });
+        events.push(`${before} left ${THEIR[side]} slot ${slot + 1} — ${destination(before, side)}.`);
+      } else if (before !== null && after !== null) {
+        arrivals[side] += 1;
+        vanished.push({ side, slot, label: before });
+        events.push(
+          `${THEIR[side]} slot ${slot + 1}: ${after} replaced ${before} — ${destination(before, side)}.`,
+        );
+      }
+    }
+  }
+
+  // Pile movement the field diff did not already account for — a hand card
+  // banished, a deck card milled, or a card recovered back out of the pile.
+  for (const side of SIDES) {
+    for (const label of pile[side].added) {
+      events.push(`${label} was added to ${THEIR[side]} banished pile.`);
+    }
+    for (const label of pile[side].removed) {
+      events.push(`${label} left ${THEIR[side]} banished pile.`);
+    }
+    if (faceDown[side] > 0) {
+      events.push(`${WHO[side]} banished ${faceDown[side]} card${plural(faceDown[side])} face-down.`);
+    }
+  }
+
+  for (const side of SIDES) {
+    const deckDelta = next.deck[side] - prev.deck[side];
+    const handDelta = next.hand[side] - prev.hand[side];
+
+    let drawn = 0;
+    if (deckDelta < 0) {
+      const lost = -deckDelta;
+      // A deck card that shows up in hand is a draw; one that does not was
+      // milled or attacked off the top.
+      drawn = Math.min(lost, Math.max(0, handDelta));
+      if (drawn > 0) events.push(`${WHO[side]} drew ${drawn} card${plural(drawn)}.`);
+      const milled = lost - drawn;
+      if (milled > 0) {
+        events.push(`${WHO[side]} lost ${milled} card${plural(milled)} off the top of ${THEIR[side]} deck.`);
+      }
+    } else if (deckDelta > 0) {
+      events.push(`${deckDelta} card${plural(deckDelta)} went back into ${THEIR[side]} deck.`);
+    }
+
+    // Whatever the hand lost beyond the cards it spent on the field.
+    const residual = handDelta - drawn + arrivals[side];
+    if (residual < 0) {
+      events.push(`${WHO[side]} lost ${-residual} card${plural(-residual)} from hand.`);
+    }
+  }
+
+  for (const side of SIDES) {
+    if (next.turns[side] > prev.turns[side]) events.push(`${WHO[side]} ended ${THEIR[side]} turn.`);
+  }
+
+  if (prev.loser === null && next.loser !== null) {
+    events.push(next.loser === pid ? 'Game over — you lose.' : 'Game over — you win.');
+  }
+
+  return { events, vanished };
+}
 
 const BTN_FOCUS =
   'focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white';
@@ -146,6 +320,41 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
     if (gameOver) endScreenRef.current?.focus();
   }, [gameOver]);
 
+  const [log, setLog] = useState<{ id: number; text: string }[]>([]);
+  const [ghosts, setGhosts] = useState<(Vanished & { id: number })[]>([]);
+  const prevSnapRef = useRef<Snapshot | null>(null);
+  const nextIdRef = useRef(0);
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  useEffect(() => () => timersRef.current.forEach(clearTimeout), []);
+
+  // Every board update is diffed against the previous one. This is the only
+  // source of both the log and the removal cue — the game package is untouched.
+  useEffect(() => {
+    const next = takeSnapshot(G, pid, opp);
+    const prev = prevSnapRef.current;
+    prevSnapRef.current = next;
+    if (!prev) return; // first render just establishes the baseline
+
+    const { events, vanished } = diffSnapshots(prev, next, pid);
+
+    if (vanished.length > 0) {
+      const stamped = vanished.map((v) => ({ ...v, id: nextIdRef.current++ }));
+      setGhosts((cur) => [...cur, ...stamped]);
+      const ids = new Set(stamped.map((g) => g.id));
+      timersRef.current.push(
+        setTimeout(() => setGhosts((cur) => cur.filter((g) => !ids.has(g.id))), GHOST_MS),
+      );
+    }
+
+    if (events.length > 0) {
+      // Ids are minted outside the updater so a double-invoked effect in
+      // StrictMode cannot burn through them.
+      const entries = [...events].reverse().map((text) => ({ id: nextIdRef.current++, text }));
+      setLog((cur) => [...entries, ...cur].slice(0, LOG_CAP));
+    }
+  }, [G, pid, opp]);
+
   function clearSelection() {
     setSelectedHandIndex(null);
     setSelectedFieldSlot(null);
@@ -257,32 +466,46 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
 
   function renderFieldSlot(side: 'own' | 'opp', slot: number, card: FieldCard | null) {
     const key = `${side}-field-${slot}`;
+    const ghost = ghosts.find((g) => g.side === side && g.slot === slot);
+    return (
+      <div key={key} className={`relative ${SLOT_BOX}`}>
+        {renderSlotContent(side, slot, card)}
+        {ghost && (
+          <img
+            key={ghost.id}
+            src={cardImageSrc(ghost.label)}
+            alt=""
+            aria-hidden="true"
+            className="sk-slot-vanish pointer-events-none absolute inset-0 h-full w-full rounded-lg object-contain"
+          />
+        )}
+      </div>
+    );
+  }
 
+  function renderSlotContent(side: 'own' | 'opp', slot: number, card: FieldCard | null) {
     if (!card) {
+      // Dashed, so an empty slot still reads as a placeholder now that it is
+      // the same size as a card.
+      const emptyBox =
+        'h-full w-full rounded-lg border border-dashed border-sk-slate/30 bg-transparent';
       if (side === 'own') {
         const canPlaceHere = isActive && !choiceActive && selectedHandIndex !== null;
         return (
           <button
-            key={key}
             type="button"
             onClick={() => handlePlayIntoSlot(slot)}
             disabled={!canPlaceHere}
             aria-label={`Empty field slot ${slot + 1}${
               canPlaceHere ? ' - play selected card here' : ''
             }`}
-            className={`${EMPTY_SLOT_BOX} border border-sk-slate/30 bg-transparent transition disabled:cursor-not-allowed disabled:opacity-40 ${
+            className={`${emptyBox} transition disabled:cursor-not-allowed disabled:opacity-40 ${
               canPlaceHere ? 'ring-1 ring-sk-slate' : ''
             }`}
           />
         );
       }
-      return (
-        <div
-          key={key}
-          aria-label={`Opponent empty field slot ${slot + 1}`}
-          className={`${EMPTY_SLOT_BOX} border border-sk-slate/30 bg-transparent`}
-        />
-      );
+      return <div aria-label={`Opponent empty field slot ${slot + 1}`} className={emptyBox} />;
     }
 
     const choiceTarget = fieldChoiceTarget(side, slot);
@@ -293,7 +516,6 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
       const disabled = choiceActive ? !isChoiceTarget : !isActive || attackedThisTurn;
       return (
         <button
-          key={key}
           type="button"
           onClick={choiceTarget ?? (() => handleSelectFieldCard(slot))}
           disabled={disabled}
@@ -301,7 +523,7 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
           aria-label={`Your field card in slot ${slot + 1}, BP ${card.currentBp}${
             isChoiceTarget ? ', valid target for pending choice — click to choose' : isSelected ? ', selected' : ''
           }`}
-          className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
+          className={`relative h-full w-full rounded-lg overflow-visible border-2 bg-neutral-950 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
             isChoiceTarget
               ? 'border-sk-red ring-2 ring-sk-red'
               : isSelected
@@ -323,14 +545,13 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
 
     return (
       <button
-        key={key}
         type="button"
         onClick={choiceTarget ?? (() => handleAttackField(slot))}
         disabled={choiceActive ? !isChoiceTarget : !canAttack}
         aria-label={`${isChoiceTarget ? 'Valid target for pending choice — choose ' : 'Attack '}opponent field card in slot ${
           slot + 1
         }, BP ${card.currentBp}`}
-        className={`relative ${FILLED_SLOT_BOX} overflow-visible border-2 bg-neutral-950 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
+        className={`relative h-full w-full rounded-lg overflow-visible border-2 bg-neutral-950 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
           isChoiceTarget ? 'border-sk-red ring-2 ring-sk-red' : 'border-sk-slate'
         }`}
       >
@@ -571,6 +792,35 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
             >
               End turn
             </button>
+          </div>
+
+          {/* EVENT LOG — newest first, so the thing that just happened is
+              always the top line and never needs scrolling to. */}
+          <div className="w-full max-w-md pt-3 text-left">
+            <h2 className="text-[10px] uppercase tracking-[0.15em] text-sk-slate">Event log</h2>
+            <ol
+              aria-live="polite"
+              aria-relevant="additions"
+              aria-label="Event log, newest first"
+              className="mt-1 max-h-32 overflow-y-auto rounded border border-sk-slate/30 px-3 py-2"
+            >
+              {log.length === 0 ? (
+                <li className="py-0.5 text-xs text-sk-slate">
+                  Nothing yet. Plays and removals will show up here.
+                </li>
+              ) : (
+                log.map((entry, i) => (
+                  <li
+                    key={entry.id}
+                    className={`border-l-2 py-0.5 pl-2 text-xs ${
+                      i === 0 ? 'border-sk-red text-white' : 'border-transparent text-sk-slate'
+                    }`}
+                  >
+                    {entry.text}
+                  </li>
+                ))
+              )}
+            </ol>
           </div>
         </section>
 

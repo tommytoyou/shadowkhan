@@ -5,3 +5,28 @@
 body {
   color: white;
 }
+
+/* Exit cue for a card leaving a field slot. The ghost is painted over the
+   now-empty slot, so the board has already reflowed to its final state before
+   the animation runs and nothing shifts when it ends. */
+@keyframes sk-slot-vanish {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+}
+
+.sk-slot-vanish {
+  animation: sk-slot-vanish 300ms ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sk-slot-vanish {
+    animation: none;
+    opacity: 0;
+  }
+}
