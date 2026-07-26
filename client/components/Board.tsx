@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { BoardProps } from 'boardgame.io/react';
 import type { ShadowkhanG, FieldCard, PendingChoice, PendingChoiceKind } from '@shadowkhan/game';
 import { cardImageSrc } from '../lib/cardImage';
@@ -29,7 +29,20 @@ const BTN_SECONDARY = `rounded border border-sk-slate px-3 py-1.5 text-sm text-w
  *  fill (black-on-white, 21:1); sk-red is only the frame around it. */
 const BTN_PRIMARY = `rounded border-2 border-sk-red bg-white px-4 py-1.5 text-sm font-bold text-black transition enabled:hover:bg-white/85 ${BTN_FOCUS} ${BTN_DISABLED}`;
 
-export default function Board({ G, moves, playerID, isActive }: Props) {
+// End-screen actions are links, not buttons: they navigate, and being copyable
+// / openable in a new tab matters when both seats have to reach the same URL.
+const LINK_PRIMARY = `inline-block rounded border-2 border-sk-red bg-white px-5 py-2 text-sm font-bold text-black transition hover:bg-white/85 ${BTN_FOCUS}`;
+const LINK_SECONDARY = `inline-block rounded border border-sk-slate px-5 py-2 text-sm text-white transition hover:bg-sk-slate/15 ${BTN_FOCUS}`;
+
+/** Next match id, derived deterministically from the current one so BOTH seats
+ *  compute the identical value and land in the same game — a rematch with no
+ *  server-side protocol, just a URL. dev-match -> dev-match-r2 -> dev-match-r3. */
+function nextMatchID(current: string): string {
+  const seen = /^(.*)-r(\d+)$/.exec(current);
+  return seen ? `${seen[1]}-r${Number(seen[2]) + 1}` : `${current}-r2`;
+}
+
+export default function Board({ G, moves, playerID, matchID, isActive }: Props) {
   const [selectedHandIndex, setSelectedHandIndex] = useState<number | null>(null);
   const [selectedFieldSlot, setSelectedFieldSlot] = useState<number | null>(null);
 
@@ -117,6 +130,21 @@ export default function Board({ G, moves, playerID, isActive }: Props) {
    *  bare "Opponent's turn" would misreport. */
   const myTurn = isActive && !gameOver;
   const turnHeadline = gameOver ? 'Game over' : isActive ? 'Your turn' : "Opponent's turn";
+
+  /** Personalised straight off `loser === pid`, which also means the winner's
+   *  seat never has to be recomputed here — game.ts already does that flip once
+   *  in endIf. Deck-out is the only path that sets `loser`, so the detail line
+   *  states exactly what the state supports and nothing more. */
+  const localPlayerLost = G.public.loser === pid;
+  const endHeadline = localPlayerLost ? 'You lose' : 'You win';
+  const endDetail = localPlayerLost
+    ? 'You ran out of cards.'
+    : 'Your opponent ran out of cards.';
+
+  const endScreenRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (gameOver) endScreenRef.current?.focus();
+  }, [gameOver]);
 
   function clearSelection() {
     setSelectedHandIndex(null);
@@ -425,12 +453,10 @@ export default function Board({ G, moves, playerID, isActive }: Props) {
           aria-label="Game status and controls"
           className="flex flex-col items-center gap-2 border-b border-sk-red/60 pb-8 text-center"
         >
-          {G.public.loser !== null ? (
-            <p className="text-xl font-bold text-white">
-              Player {G.public.loser === '0' ? '1' : '0'} wins — Player {G.public.loser} ran out
-              of cards.
-            </p>
-          ) : myChoice ? (
+          {/* The result now lives in the end screen; suppress this row entirely
+              at game over so a stale "select a hand card" prompt is not left
+              sitting behind the overlay. */}
+          {gameOver ? null : myChoice ? (
             <div
               role="group"
               aria-label="Pending ability choice"
@@ -612,6 +638,59 @@ export default function Board({ G, moves, playerID, isActive }: Props) {
           </div>
         </section>
       </div>
+
+      {/* END SCREEN — the board stays readable behind a dimmed, blurred
+          backdrop, so the final position can still be seen. */}
+      {gameOver && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4 backdrop-blur-sm">
+          <div
+            ref={endScreenRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="end-screen-title"
+            aria-describedby="end-screen-detail"
+            tabIndex={-1}
+            className="w-full max-w-md rounded-xl border-2 border-sk-slate bg-black px-8 py-10 text-center focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            <h2
+              id="end-screen-title"
+              className="font-[family-name:var(--font-heading)] text-5xl uppercase tracking-[0.15em] text-white sm:text-6xl"
+            >
+              {endHeadline}
+            </h2>
+
+            {/* Same accent rule the landing page uses under the wordmark. */}
+            <span className="mx-auto mt-5 block h-1 w-16 bg-sk-red" aria-hidden="true" />
+
+            <p
+              id="end-screen-detail"
+              aria-live="assertive"
+              className="mt-5 text-sm text-sk-slate"
+            >
+              {endDetail}
+            </p>
+
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+              <a
+                href={`/play?player=${encodeURIComponent(pid)}&match=${encodeURIComponent(
+                  nextMatchID(matchID),
+                )}`}
+                className={LINK_PRIMARY}
+              >
+                New match
+              </a>
+              <a href="/" className={LINK_SECONDARY}>
+                Back to home
+              </a>
+            </div>
+
+            <p className="mt-6 text-xs text-sk-slate">
+              New match keeps you in seat {pid}. Your opponent has to open it too — both seats
+              land in the same next match.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
