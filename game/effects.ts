@@ -741,7 +741,17 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
       trigger: 'onSummon',
       auto: true,
       run: ({ G, ctx, self }) => {
-        const isEligible = (label: string): boolean => {
+        // Reads the LIVE G that searchIndices threads in — at open time AND
+        // at resolve time — never this run()'s own captured G. The search's
+        // getOptions/resolve run in a LATER resolveChoice dispatch whose draft
+        // has replaced this one, so a predicate closing over the outer G would
+        // hit a revoked Immer proxy (`Cannot perform 'get' on a proxy that has
+        // been revoked`). self.pid is a plain string (fireTrigger builds self
+        // as a plain {pid, slot}), so closing over it stays safe. The count is
+        // identical at both call times: no move runs while the pendingChoice is
+        // open, and searchIndices re-runs before apply() splices the pick out,
+        // so the candidate is still in-deck for the -1 either way.
+        const isEligible = (label: string, Glive: ShadowkhanG): boolean => {
           const card = CARD_BY_LABEL[label];
           if (!card || card.type !== 'battle' || (card.bp ?? 0) > 8) return false;
           const bp = card.bp ?? 0;
@@ -749,7 +759,7 @@ const ABILITIES_BY_LABEL: Record<string, Ability[]> = {
           // this evaluation point (search only scans, never mutates), so it
           // must not count toward its own cost pool.
           const availableForCost =
-            G.secret.hands[self.pid].length + G.secret.decks[self.pid].length - 1;
+            Glive.secret.hands[self.pid].length + Glive.secret.decks[self.pid].length - 1;
           return availableForCost >= bp;
         };
         dispatchSearch(
@@ -2757,11 +2767,16 @@ function searchIndices(
   G: ShadowkhanG,
   zone: SearchZone,
   owner: string,
-  predicate: (label: string) => boolean
+  predicate: (label: string, G: ShadowkhanG) => boolean
 ): number[] {
   const source = readZoneSource(G, zone, owner);
+  // The LIVE G this call was handed is passed straight through to the
+  // predicate. getOptions/resolve re-run this from a LATER resolveChoice
+  // dispatch (see dispatchSearch), so a predicate that needs game state must
+  // read the G threaded here — closing over the state's own run()-tick draft
+  // would dereference an already-revoked Immer proxy at resolve time.
   return source
-    .map((label, i) => (predicate(label) ? i : null))
+    .map((label, i) => (predicate(label, G) ? i : null))
     .filter((i): i is number => i !== null);
 }
 
@@ -2809,7 +2824,7 @@ function dispatchSearch(
   key: string,
   zone: SearchZone,
   owner: string,
-  predicate: (label: string) => boolean,
+  predicate: (label: string, G: ShadowkhanG) => boolean,
   prompt: string,
   apply: (G: ShadowkhanG, ctx: EngineCtx, owner: string, realIndex: number) => void
 ): void {
@@ -2879,7 +2894,7 @@ function dispatchMultiSearch(
   key: string,
   zone: SearchZone,
   owner: string,
-  predicate: (label: string) => boolean,
+  predicate: (label: string, G: ShadowkhanG) => boolean,
   count: number,
   exact: boolean,
   prompt: string,
