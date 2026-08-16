@@ -336,7 +336,18 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
   const nextIdRef = useRef(0);
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const mountCueFiredRef = useRef(false);
-  const { play, muted, toggleMuted } = useAudio();
+  const {
+    play,
+    muted,
+    toggleMuted,
+    musicPlaying,
+    toggleMusicPlaying,
+    nextTrack,
+    shuffle,
+    toggleShuffle,
+    volume,
+    setVolume,
+  } = useAudio();
 
   useEffect(() => () => timersRef.current.forEach(clearTimeout), []);
 
@@ -658,6 +669,55 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
               >
                 {muted ? 'Unmute' : 'Mute'}
               </button>
+
+              {/* MUSIC CONTROLS — a self-contained cluster so it wraps as one
+                  unit on narrow viewports rather than splitting mid-group. */}
+              <div
+                role="group"
+                aria-label="Music player"
+                className="flex flex-wrap items-center gap-1 rounded border border-sk-slate/30 px-2 py-1"
+              >
+                <button
+                  type="button"
+                  onClick={toggleMusicPlaying}
+                  aria-label={musicPlaying ? 'Pause music' : 'Play music'}
+                  aria-pressed={musicPlaying}
+                  className={BTN_SECONDARY}
+                >
+                  {musicPlaying ? 'Pause' : 'Play'}
+                </button>
+                <button
+                  type="button"
+                  onClick={nextTrack}
+                  aria-label="Next track"
+                  className={BTN_SECONDARY}
+                >
+                  Next
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleShuffle}
+                  aria-label={`Shuffle ${shuffle ? 'on' : 'off'} — toggle shuffle`}
+                  aria-pressed={shuffle}
+                  className={`${BTN_SECONDARY} ${shuffle ? 'ring-2 ring-white' : ''}`}
+                >
+                  Shuffle
+                </button>
+                <span aria-hidden="true" className="text-[10px] text-sk-slate">
+                  Vol
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={volume}
+                  onChange={(e) => setVolume(Number(e.target.value))}
+                  aria-label="Music volume"
+                  className={`h-1 w-16 accent-white ${BTN_FOCUS}`}
+                />
+              </div>
+
               <div className="flex flex-col items-start gap-1">
                 <button
                   type="button"
