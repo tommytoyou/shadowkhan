@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Fjalla_One, Open_Sans } from 'next/font/google';
+import AudioProvider from '../components/AudioProvider';
 import './globals.css';
 
 const fjallaOne = Fjalla_One({
@@ -26,7 +27,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${fjallaOne.variable} ${openSans.variable} bg-black font-[family-name:var(--font-body)]`}>
-        {children}
+        <AudioProvider>{children}</AudioProvider>
       </body>
     </html>
   );

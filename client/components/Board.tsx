@@ -13,6 +13,7 @@ import {
 } from '../lib/ui';
 import CardBack from './CardBack';
 import HowToPlayDialog from './HowToPlayDialog';
+import { useAudio, type SfxCue } from './AudioProvider';
 
 type Props = BoardProps<ShadowkhanG>;
 
@@ -47,6 +48,11 @@ type Snapshot = {
 };
 
 type Vanished = { side: Side; slot: number; label: string };
+
+/** A log line, tagged with the SFX cue it represents (if any). Tagged at the
+ *  exact spot each event is classified, so the audio hookup reuses the same
+ *  classification the log already does rather than re-deriving it from G. */
+type LogEvent = { text: string; cue?: SfxCue };
 
 function takeSnapshot(G: ShadowkhanG, pid: string, opp: string): Snapshot {
   const per = <T,>(read: (p: string) => T): Record<Side, T> => ({
@@ -94,8 +100,8 @@ function diffSnapshots(
   prev: Snapshot,
   next: Snapshot,
   pid: string,
-): { events: string[]; vanished: Vanished[] } {
-  const events: string[] = [];
+): { events: LogEvent[]; vanished: Vanished[] } {
+  const events: LogEvent[] = [];
   const vanished: Vanished[] = [];
 
   const pile: Record<Side, ReturnType<typeof multisetDiff>> = {
@@ -129,16 +135,16 @@ function diffSnapshots(
 
       if (before === null && after !== null) {
         arrivals[side] += 1;
-        events.push(`${WHO[side]} played ${after} to slot ${slot + 1}.`);
+        events.push({ text: `${WHO[side]} played ${after} to slot ${slot + 1}.`, cue: 'played' });
       } else if (before !== null && after === null) {
         vanished.push({ side, slot, label: before });
-        events.push(`${before} left ${THEIR[side]} slot ${slot + 1} — ${destination(before, side)}.`);
+        events.push({ text: `${before} left ${THEIR[side]} slot ${slot + 1} — ${destination(before, side)}.` });
       } else if (before !== null && after !== null) {
         arrivals[side] += 1;
         vanished.push({ side, slot, label: before });
-        events.push(
-          `${THEIR[side]} slot ${slot + 1}: ${after} replaced ${before} — ${destination(before, side)}.`,
-        );
+        events.push({
+          text: `${THEIR[side]} slot ${slot + 1}: ${after} replaced ${before} — ${destination(before, side)}.`,
+        });
       }
     }
   }
@@ -147,13 +153,16 @@ function diffSnapshots(
   // banished, a deck card milled, or a card recovered back out of the pile.
   for (const side of SIDES) {
     for (const label of pile[side].added) {
-      events.push(`${label} was added to ${THEIR[side]} banished pile.`);
+      events.push({ text: `${label} was added to ${THEIR[side]} banished pile.`, cue: 'banished' });
     }
     for (const label of pile[side].removed) {
-      events.push(`${label} left ${THEIR[side]} banished pile.`);
+      events.push({ text: `${label} left ${THEIR[side]} banished pile.` });
     }
     if (faceDown[side] > 0) {
-      events.push(`${WHO[side]} banished ${faceDown[side]} card${plural(faceDown[side])} face-down.`);
+      events.push({
+        text: `${WHO[side]} banished ${faceDown[side]} card${plural(faceDown[side])} face-down.`,
+        cue: 'banished',
+      });
     }
   }
 
@@ -167,28 +176,33 @@ function diffSnapshots(
       // A deck card that shows up in hand is a draw; one that does not was
       // milled or attacked off the top.
       drawn = Math.min(lost, Math.max(0, handDelta));
-      if (drawn > 0) events.push(`${WHO[side]} drew ${drawn} card${plural(drawn)}.`);
+      if (drawn > 0) events.push({ text: `${WHO[side]} drew ${drawn} card${plural(drawn)}.`, cue: 'drawn' });
       const milled = lost - drawn;
       if (milled > 0) {
-        events.push(`${WHO[side]} lost ${milled} card${plural(milled)} off the top of ${THEIR[side]} deck.`);
+        events.push({
+          text: `${WHO[side]} lost ${milled} card${plural(milled)} off the top of ${THEIR[side]} deck.`,
+        });
       }
     } else if (deckDelta > 0) {
-      events.push(`${deckDelta} card${plural(deckDelta)} went back into ${THEIR[side]} deck.`);
+      events.push({
+        text: `${deckDelta} card${plural(deckDelta)} went back into ${THEIR[side]} deck.`,
+        cue: 'shuffled',
+      });
     }
 
     // Whatever the hand lost beyond the cards it spent on the field.
     const residual = handDelta - drawn + arrivals[side];
     if (residual < 0) {
-      events.push(`${WHO[side]} lost ${-residual} card${plural(-residual)} from hand.`);
+      events.push({ text: `${WHO[side]} lost ${-residual} card${plural(-residual)} from hand.` });
     }
   }
 
   for (const side of SIDES) {
-    if (next.turns[side] > prev.turns[side]) events.push(`${WHO[side]} ended ${THEIR[side]} turn.`);
+    if (next.turns[side] > prev.turns[side]) events.push({ text: `${WHO[side]} ended ${THEIR[side]} turn.` });
   }
 
   if (prev.loser === null && next.loser !== null) {
-    events.push(next.loser === pid ? 'Game over — you lose.' : 'Game over — you win.');
+    events.push({ text: next.loser === pid ? 'Game over — you lose.' : 'Game over — you win.' });
   }
 
   return { events, vanished };
@@ -321,16 +335,31 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
   const prevSnapRef = useRef<Snapshot | null>(null);
   const nextIdRef = useRef(0);
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const mountCueFiredRef = useRef(false);
+  const { play, muted, toggleMuted } = useAudio();
 
   useEffect(() => () => timersRef.current.forEach(clearTimeout), []);
 
   // Every board update is diffed against the previous one. This is the only
   // source of both the log and the removal cue — the game package is untouched.
+  // SFX cues are fired from the same classification the log lines already
+  // carry (LogEvent.cue), not re-derived from G.
   useEffect(() => {
     const next = takeSnapshot(G, pid, opp);
     const prev = prevSnapRef.current;
     prevSnapRef.current = next;
-    if (!prev) return; // first render just establishes the baseline
+    if (!prev) {
+      // First render just establishes the baseline — but it's also the only
+      // point that corresponds to the initial deck shuffle in setup(), which
+      // produces no diff of its own to hang a cue off. Fire it once here.
+      // Guarded against React StrictMode's dev-only double-invoke of mount
+      // effects, which would otherwise fire it twice.
+      if (!mountCueFiredRef.current) {
+        mountCueFiredRef.current = true;
+        play('shuffled');
+      }
+      return;
+    }
 
     const { events, vanished } = diffSnapshots(prev, next, pid);
 
@@ -344,12 +373,19 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
     }
 
     if (events.length > 0) {
+      // At most one play() per distinct cue per diff, so several events of
+      // the same kind in one update (e.g. two cards banished at once) don't
+      // stack duplicate sounds.
+      const cues = new Set<SfxCue>();
+      for (const e of events) if (e.cue) cues.add(e.cue);
+      cues.forEach((cue) => play(cue));
+
       // Ids are minted outside the updater so a double-invoked effect in
       // StrictMode cannot burn through them.
-      const entries = [...events].reverse().map((text) => ({ id: nextIdRef.current++, text }));
+      const entries = [...events].reverse().map((e) => ({ id: nextIdRef.current++, text: e.text }));
       setLog((cur) => [...entries, ...cur].slice(0, LOG_CAP));
     }
-  }, [G, pid, opp]);
+  }, [G, pid, opp, play]);
 
   function clearSelection() {
     setSelectedHandIndex(null);
@@ -612,17 +648,28 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
               </div>
             </dl>
 
-            <div className="flex flex-col items-start gap-1">
+            <div className="flex items-start gap-2">
               <button
                 type="button"
-                onClick={openHelp}
-                className={`rounded border border-sk-slate/50 px-3 py-1.5 text-xs text-sk-slate transition hover:border-sk-slate hover:text-white ${BTN_FOCUS}`}
+                onClick={toggleMuted}
+                aria-label={muted ? 'Unmute sound effects' : 'Mute sound effects'}
+                aria-pressed={muted}
+                className={BTN_SECONDARY}
               >
-                How to play
+                {muted ? 'Unmute' : 'Mute'}
               </button>
-              {!helpSeen && (
-                <p className="text-[10px] text-sk-slate">New here? Start here.</p>
-              )}
+              <div className="flex flex-col items-start gap-1">
+                <button
+                  type="button"
+                  onClick={openHelp}
+                  className={`rounded border border-sk-slate/50 px-3 py-1.5 text-xs text-sk-slate transition hover:border-sk-slate hover:text-white ${BTN_FOCUS}`}
+                >
+                  How to play
+                </button>
+                {!helpSeen && (
+                  <p className="text-[10px] text-sk-slate">New here? Start here.</p>
+                )}
+              </div>
             </div>
           </div>
         </header>
