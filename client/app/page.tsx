@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import HowToPlayDialog from '../components/HowToPlayDialog';
 import { BTN_FOCUS, BTN_PRIMARY, BTN_SECONDARY, EYEBROW } from '../lib/ui';
@@ -167,6 +168,18 @@ export default function Home() {
               {joinError ?? ''}
             </p>
           </form>
+        </section>
+
+        <section className="mt-10" aria-labelledby="cpu-heading">
+          <h2 id="cpu-heading" className={EYEBROW}>
+            Or play solo
+          </h2>
+          <p className="mt-2 text-sm text-sk-slate">
+            Play a solo game against the computer.
+          </p>
+          <Link href="/cpu" className={`${BTN_SECONDARY} mt-2 inline-block`}>
+            Play vs CPU
+          </Link>
         </section>
 
         <div className="mt-10">
