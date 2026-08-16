@@ -52,17 +52,6 @@ const MAX_REPEATS = 3;
  *  candidate list (12 plays + 15 attacks + 3 activations + bottom-up). */
 const MAX_ATTEMPTS_PER_STATE = 48;
 
-/** Absolute ceiling on dispatches within a single bot turn, counting rejects.
- *  TURN_BUDGET deliberately counts only moves that landed, so a pile of
- *  illegal candidates cannot crowd out the legal ones — but that leaves every
- *  remaining guard (triedRef, attemptsRef, deadEndRef) keyed to the state
- *  signature, and all of them reset the moment it changes. If the signature
- *  churns for any reason, those guards reset faster than they can bound
- *  anything and the driver will dispatch without limit. This is the one bound
- *  that resets only on a genuine turn change, so it holds regardless. Set well
- *  above what an honest turn needs (24 landed moves plus rejects). */
-const MAX_DISPATCHES_PER_TURN = 120;
-
 type Props = BoardProps<ShadowkhanG>;
 
 /** A move the bot might dispatch. `key` identifies it within one state so an
@@ -206,9 +195,6 @@ function BotDriver(props: Props) {
    *  have landed — the only way to tell an accepted move from a rejected one,
    *  and therefore the only sound basis for charging the turn budget. */
   const pendingActionRef = useRef<string | null>(null);
-  /** Every dispatch this turn, landed or rejected. Reset only on a turn
-   *  change — see MAX_DISPATCHES_PER_TURN. */
-  const dispatchesThisTurnRef = useRef(0);
   /** Consecutive `endTurn` dispatches that failed to move the signature. */
   const deadEndRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -255,7 +241,6 @@ function BotDriver(props: Props) {
       if (turnChanged) {
         turnRef.current = ctx.turn;
         actionsThisTurnRef.current = 0;
-        dispatchesThisTurnRef.current = 0;
       } else if (landed) {
         actionsThisTurnRef.current += 1;
       }
@@ -266,7 +251,6 @@ function BotDriver(props: Props) {
      *  at most one dispatch per unchanged signature per RETRY_MS. */
     const dispatch = (send: () => void) => {
       attemptsRef.current += 1;
-      dispatchesThisTurnRef.current += 1;
       send();
       clearTimer();
       timerRef.current = setTimeout(step, RETRY_MS);
@@ -280,20 +264,13 @@ function BotDriver(props: Props) {
 
       // Once the game is decided there is nothing legal left to do, but
       // `endTurn` still advances ctx.turn — and a turn change resets every
-      // guard here (triedRef, attemptsRef, deadEndRef, the per-turn dispatch
-      // ceiling). Without this the driver flips turns forever against a
-      // finished game, dispatching moves the engine rejects, and no backstop
-      // can ever catch it because they are all reset on the way round.
+      // guard here (triedRef, attemptsRef, deadEndRef). Without this the
+      // driver flips turns forever against a finished game, dispatching moves
+      // the engine rejects, and no backstop can ever catch it because they
+      // are all reset on the way round.
       if (ctx.gameover !== undefined) return;
 
       if (!isActive) return;
-
-      if (dispatchesThisTurnRef.current >= MAX_DISPATCHES_PER_TURN) {
-        console.warn(
-          `[BotDriver] giving up: ${dispatchesThisTurnRef.current} dispatches in one turn`
-        );
-        return;
-      }
 
       if (attemptsRef.current >= MAX_ATTEMPTS_PER_STATE) {
         console.warn(
