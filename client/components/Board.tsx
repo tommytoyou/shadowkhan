@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BoardProps } from 'boardgame.io/react';
 import type { ShadowkhanG, FieldCard, PendingChoice, PendingChoiceKind } from '@shadowkhan/game';
-import { cardImageSrc, cardDisplayName } from '../lib/cardImage';
+import { cardImageSrc, cardDisplayName, cardDisplayNameWithBp } from '../lib/cardImage';
 import {
   BTN_FOCUS,
   BTN_PRIMARY,
@@ -39,6 +39,7 @@ const plural = (n: number) => (n === 1 ? '' : 's');
  *  state, so it reads the same on both clients. */
 type Snapshot = {
   field: Record<Side, (string | null)[]>;
+  fieldBp: Record<Side, number[]>;
   banished: Record<Side, string[]>;
   faceDown: Record<Side, number>;
   deck: Record<Side, number>;
@@ -61,6 +62,7 @@ function takeSnapshot(G: ShadowkhanG, pid: string, opp: string): Snapshot {
   });
   return {
     field: per((p) => (G.public.field[p] ?? [null, null, null]).map((c) => c?.label ?? null)),
+    fieldBp: per((p) => (G.public.field[p] ?? [null, null, null]).map((c) => c?.currentBp ?? 0)),
     banished: per((p) => [...(G.public.banished[p] ?? [])]),
     faceDown: per((p) => G.public.banishedFaceDown[p] ?? 0),
     deck: per((p) => G.public.deckCounts[p] ?? 0),
@@ -136,19 +138,19 @@ function diffSnapshots(
       if (before === null && after !== null) {
         arrivals[side] += 1;
         events.push({
-          text: `${WHO[side]} played ${cardDisplayName(after)} to slot ${slot + 1}.`,
+          text: `${WHO[side]} played ${cardDisplayNameWithBp(after, next.fieldBp[side][slot])} to slot ${slot + 1}.`,
           cue: 'played',
         });
       } else if (before !== null && after === null) {
         vanished.push({ side, slot, label: before });
         events.push({
-          text: `${cardDisplayName(before)} left ${THEIR[side]} slot ${slot + 1} — ${destination(before, side)}.`,
+          text: `${cardDisplayNameWithBp(before, prev.fieldBp[side][slot])} left ${THEIR[side]} slot ${slot + 1} — ${destination(before, side)}.`,
         });
       } else if (before !== null && after !== null) {
         arrivals[side] += 1;
         vanished.push({ side, slot, label: before });
         events.push({
-          text: `${THEIR[side]} slot ${slot + 1}: ${cardDisplayName(after)} replaced ${cardDisplayName(before)} — ${destination(before, side)}.`,
+          text: `${THEIR[side]} slot ${slot + 1}: ${cardDisplayNameWithBp(after, next.fieldBp[side][slot])} replaced ${cardDisplayNameWithBp(before, prev.fieldBp[side][slot])} — ${destination(before, side)}.`,
         });
       }
     }
@@ -159,12 +161,12 @@ function diffSnapshots(
   for (const side of SIDES) {
     for (const label of pile[side].added) {
       events.push({
-        text: `${cardDisplayName(label)} was added to ${THEIR[side]} banished pile.`,
+        text: `${cardDisplayNameWithBp(label)} was added to ${THEIR[side]} banished pile.`,
         cue: 'banished',
       });
     }
     for (const label of pile[side].removed) {
-      events.push({ text: `${cardDisplayName(label)} left ${THEIR[side]} banished pile.` });
+      events.push({ text: `${cardDisplayNameWithBp(label)} left ${THEIR[side]} banished pile.` });
     }
     if (faceDown[side] > 0) {
       events.push({
