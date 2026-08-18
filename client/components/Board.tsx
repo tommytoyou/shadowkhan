@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BoardProps } from 'boardgame.io/react';
 import type { ShadowkhanG, FieldCard, PendingChoice, PendingChoiceKind } from '@shadowkhan/game';
-import { cardImageSrc } from '../lib/cardImage';
+import { cardImageSrc, cardDisplayName } from '../lib/cardImage';
 import {
   BTN_FOCUS,
   BTN_PRIMARY,
@@ -135,15 +135,20 @@ function diffSnapshots(
 
       if (before === null && after !== null) {
         arrivals[side] += 1;
-        events.push({ text: `${WHO[side]} played ${after} to slot ${slot + 1}.`, cue: 'played' });
+        events.push({
+          text: `${WHO[side]} played ${cardDisplayName(after)} to slot ${slot + 1}.`,
+          cue: 'played',
+        });
       } else if (before !== null && after === null) {
         vanished.push({ side, slot, label: before });
-        events.push({ text: `${before} left ${THEIR[side]} slot ${slot + 1} — ${destination(before, side)}.` });
+        events.push({
+          text: `${cardDisplayName(before)} left ${THEIR[side]} slot ${slot + 1} — ${destination(before, side)}.`,
+        });
       } else if (before !== null && after !== null) {
         arrivals[side] += 1;
         vanished.push({ side, slot, label: before });
         events.push({
-          text: `${THEIR[side]} slot ${slot + 1}: ${after} replaced ${before} — ${destination(before, side)}.`,
+          text: `${THEIR[side]} slot ${slot + 1}: ${cardDisplayName(after)} replaced ${cardDisplayName(before)} — ${destination(before, side)}.`,
         });
       }
     }
@@ -153,10 +158,13 @@ function diffSnapshots(
   // banished, a deck card milled, or a card recovered back out of the pile.
   for (const side of SIDES) {
     for (const label of pile[side].added) {
-      events.push({ text: `${label} was added to ${THEIR[side]} banished pile.`, cue: 'banished' });
+      events.push({
+        text: `${cardDisplayName(label)} was added to ${THEIR[side]} banished pile.`,
+        cue: 'banished',
+      });
     }
     for (const label of pile[side].removed) {
-      events.push({ text: `${label} left ${THEIR[side]} banished pile.` });
+      events.push({ text: `${cardDisplayName(label)} left ${THEIR[side]} banished pile.` });
     }
     if (faceDown[side] > 0) {
       events.push({
@@ -477,16 +485,20 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
     switch (kind) {
       case 'opponentField': {
         const card = oppField[opt];
-        return card ? `Slot ${opt + 1}: ${card.label} (BP ${card.currentBp})` : `Slot ${opt + 1}`;
+        return card
+          ? `Slot ${opt + 1}: ${cardDisplayName(card.label)} (BP ${card.currentBp})`
+          : `Slot ${opt + 1}`;
       }
       case 'ownField': {
         const card = ownField[opt];
-        return card ? `Slot ${opt + 1}: ${card.label} (BP ${card.currentBp})` : `Slot ${opt + 1}`;
+        return card
+          ? `Slot ${opt + 1}: ${cardDisplayName(card.label)} (BP ${card.currentBp})`
+          : `Slot ${opt + 1}`;
       }
       case 'opponentHandIndex':
         return `Opponent hand card ${opt + 1}`;
       case 'ownHandIndex':
-        return `Your hand card ${opt + 1}: ${ownHand[opt] ?? ''}`;
+        return `Your hand card ${opt + 1}: ${ownHand[opt] ? cardDisplayName(ownHand[opt]) : ''}`;
       case 'chooseAbility':
         return `Choice ${opt + 1}`;
       default:
@@ -984,7 +996,7 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
                   onClick={() => handleSelectHandCard(i)}
                   disabled={!isActive || choiceActive}
                   aria-pressed={isSelected}
-                  aria-label={`Your hand card ${i + 1}: ${label}${
+                  aria-label={`Your hand card ${i + 1}: ${cardDisplayName(label)}${
                     isSelected ? ', selected' : ''
                   }`}
                   className={`aspect-[2.5/3.5] w-44 shrink-0 overflow-hidden rounded-lg border-2 bg-neutral-950 transition disabled:cursor-not-allowed disabled:opacity-50 ${
