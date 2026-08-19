@@ -577,7 +577,7 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
           onClick={choiceTarget ?? (() => handleSelectFieldCard(slot))}
           disabled={disabled}
           aria-pressed={isSelected}
-          aria-label={`Your field card in slot ${slot + 1}, BP ${card.currentBp}${
+          aria-label={`Your field card in slot ${slot + 1}: ${cardDisplayNameWithBp(card.label, card.currentBp)}${
             isChoiceTarget ? ', valid target for pending choice — click to choose' : isSelected ? ', selected' : ''
           }`}
           className={`relative h-full w-full rounded-lg overflow-visible border-2 bg-neutral-950 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
@@ -607,7 +607,7 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
         disabled={choiceActive ? !isChoiceTarget : !canAttack}
         aria-label={`${isChoiceTarget ? 'Valid target for pending choice — choose ' : 'Attack '}opponent field card in slot ${
           slot + 1
-        }, BP ${card.currentBp}`}
+        }: ${cardDisplayNameWithBp(card.label, card.currentBp)}`}
         className={`relative h-full w-full rounded-lg overflow-visible border-2 bg-neutral-950 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-black focus-visible:ring-white ${
           isChoiceTarget ? 'border-sk-red ring-2 ring-sk-red' : 'border-sk-slate'
         }`}
@@ -998,7 +998,7 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
                   onClick={() => handleSelectHandCard(i)}
                   disabled={!isActive || choiceActive}
                   aria-pressed={isSelected}
-                  aria-label={`Your hand card ${i + 1}: ${cardDisplayName(label)}${
+                  aria-label={`Your hand card ${i + 1}: ${cardDisplayNameWithBp(label)}${
                     isSelected ? ', selected' : ''
                   }`}
                   className={`aspect-[2.5/3.5] w-44 shrink-0 overflow-hidden rounded-lg border-2 bg-neutral-950 transition disabled:cursor-not-allowed disabled:opacity-50 ${
