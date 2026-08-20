@@ -500,7 +500,7 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
       case 'opponentHandIndex':
         return `Opponent hand card ${opt + 1}`;
       case 'ownHandIndex':
-        return `Your hand card ${opt + 1}: ${ownHand[opt] ? cardDisplayName(ownHand[opt]) : ''}`;
+        return `Your hand card ${opt + 1}: ${ownHand[opt] ? cardDisplayNameWithBp(ownHand[opt]) : ''}`;
       case 'chooseAbility':
         return `Choice ${opt + 1}`;
       default:
