@@ -74,6 +74,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         turnsTaken: { '0': 0, '1': 0 },
         bottomUpUsed: { '0': false, '1': false },
         attackedThisTurn: false,
+        battleCardPlayedThisTurn: false,
         loser: null,
         rulesOfEngagementActive: false,
         pendingChoice: null,
@@ -108,6 +109,7 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
   turn: {
     onBegin: ({ G, ctx, random, events }) => {
       G.public.attackedThisTurn = false;
+      G.public.battleCardPlayedThisTurn = false;
 
       const pid = ctx.currentPlayer;
 
@@ -126,17 +128,26 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
       // it, since its entry has already been popped off the queue by now.
       if (G.public.pendingChoice) return;
 
-      const bothReady =
-        G.public.turnsTaken['0'] >= 1 && G.public.turnsTaken['1'] >= 1;
-
-      if (bothReady) {
-        const hand = G.secret.hands[pid];
-        if (hand.length < MAX_HAND_SIZE) {
-          if (G.secret.decks[pid].length === 0) {
+      const hand = G.secret.hands[pid];
+      if (hand.length < MAX_HAND_SIZE) {
+        if (G.secret.decks[pid].length === 0) {
+          // Real game rule, not a test accommodation: a player cannot lose
+          // by deck-out before BOTH players have taken a turn. In actual
+          // play this branch is unreachable that early anyway (every deck
+          // starts with all 27 cards), so this only ever matters once the
+          // game is genuinely underway and someone has run their deck dry.
+          // Checking only pid's own turnsTaken isn't enough — a player can
+          // be mid-game (turnsTaken >= 1) while their opponent hasn't gone
+          // yet in the same sense the old bothReady gate cared about, so
+          // this stays a two-player condition, same as bothReady was; the
+          // auto-draw just above is NOT gated by it — only the loss is.
+          const bothStarted =
+            G.public.turnsTaken['0'] >= 1 && G.public.turnsTaken['1'] >= 1;
+          if (bothStarted) {
             G.public.loser = pid;
-          } else {
-            drawCardForPlayer(G, { ctx, random, events }, pid);
           }
+        } else {
+          drawCardForPlayer(G, { ctx, random, events }, pid);
         }
       }
     },
@@ -154,17 +165,6 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
   },
 
   moves: {
-    drawCard: {
-      client: false,
-      move: ({ G, ctx, random, events }) => {
-        if (G.public.pendingChoice) return INVALID_MOVE;
-        const pid = ctx.currentPlayer;
-        if (G.secret.hands[pid].length >= MAX_HAND_SIZE) return INVALID_MOVE;
-        if (G.secret.decks[pid].length === 0) return INVALID_MOVE;
-        drawCardForPlayer(G, { ctx, random, events }, pid);
-      },
-    },
-
     // `slot` means different things depending on the card: for a normal
     // card it must be an EMPTY slot to place into; for an attach-target
     // card (see ATTACH_TARGETS in effects.ts — currently just Sk-09) it
@@ -185,6 +185,13 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
         const card = CARD_BY_LABEL[label];
         if (!card) return INVALID_MOVE;
         if (!isPlayLegal(G, pid, label)) return INVALID_MOVE;
+        // One Battle Card per turn. battleCardPlayedThisTurn is a plain
+        // public boolean (see state.ts), reset alongside attackedThisTurn in
+        // turn.onBegin — a future card effect that grants an extra Battle
+        // Card play this turn can just set it back to false from its own
+        // run(), the same way any ability already mutates public G directly;
+        // no new mechanism would be needed here.
+        if (card.type === 'battle' && G.public.battleCardPlayedThisTurn) return INVALID_MOVE;
 
         const attachTarget = getAttachTarget(label);
         if (attachTarget) {
@@ -213,6 +220,9 @@ export const ShadowkhanGame: Game<ShadowkhanG> = {
           return;
         }
 
+        if (card.type === 'battle') {
+          G.public.battleCardPlayedThisTurn = true;
+        }
         placeCardOnField(G, engineCtx, pid, slot, label);
       },
     },

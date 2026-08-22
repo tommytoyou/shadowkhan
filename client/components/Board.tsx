@@ -291,7 +291,6 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
 
   // Reasons for the remaining gated buttons, read straight off the same
   // conditions their `disabled` props use — no new rules.
-  const drawTitle = turnDisabledReason();
   const endTurnTitle = turnDisabledReason();
   const bottomUpTitle =
     turnDisabledReason() ??
@@ -464,11 +463,6 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
     if (!isActive || choiceActive) return;
     moves.endTurn();
     clearSelection();
-  }
-
-  function handleDrawCard() {
-    if (!isActive || choiceActive) return;
-    moves.drawCard();
   }
 
   function handleBanishFromHand() {
@@ -864,16 +858,6 @@ export default function Board({ G, moves, playerID, matchID, isActive }: Props) 
           )}
 
           <div className="flex flex-wrap justify-center gap-2 pt-1">
-            <button
-              type="button"
-              onClick={handleDrawCard}
-              disabled={!isActive || choiceActive}
-              aria-label="Draw a card"
-              title={drawTitle}
-              className={BTN_SECONDARY}
-            >
-              Draw card
-            </button>
             <button
               type="button"
               onClick={handleBottomUp}

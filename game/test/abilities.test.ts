@@ -43,7 +43,12 @@ describe('Sk-11 CHOSEN CONDUIT', () => {
   test('3. answering No cancels: Sk-14 stays BP 8, all cards remain, choice clears, player can still act', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-14', 'Sk-27'], hand: ['Sk-11'], deck: ['Sk-01', 'Sk-02'] },
+        // Sk-30 is a harmless filler ahead of the deck's real content: it
+        // has no onDraw trigger (only Sk-07/Sk-28 do — see effects.ts) and
+        // its own guardian ability only matters while ON THE FIELD, so the
+        // automatic turn-1 auto-draw consumes it instead of Sk-01, leaving
+        // the deck at the 2 cards this test's own bottomUp call needs.
+        '0': { field: ['Sk-14', 'Sk-27'], hand: ['Sk-11'], deck: ['Sk-30', 'Sk-01', 'Sk-02'] },
         '1': { field: [] },
       },
     });
@@ -290,7 +295,13 @@ describe('Sk-24a BLAZING SKY GOBLIN', () => {
   test('13. Sand Squid on own field and A Sinister Alliance in deck: fires and adds it to hand', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-21'], hand: ['Sk-24'], deck: ['Sk-08', 'Sk-01'] },
+        // Sk-24 relocated from hand to the deck's top: the automatic turn-1
+        // auto-draw draws it into hand BEFORE the test's own playCard call,
+        // reconstructing the exact original hand/deck split (hand: ['Sk-24'],
+        // deck: ['Sk-08', 'Sk-01']) with no foreign card left sitting in
+        // hand afterward — unlike an unrelated filler, which would still be
+        // there polluting the exact hands['0'] equality check below.
+        '0': { field: ['Sk-21'], hand: [], deck: ['Sk-24', 'Sk-08', 'Sk-01'] },
         '1': { field: [] },
       },
     });
@@ -314,7 +325,9 @@ describe('Sk-24a BLAZING SKY GOBLIN', () => {
   test("14. deck has no A Sinister Alliance: resolves silently, no prompt opens", () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-21'], hand: ['Sk-24'], deck: ['Sk-01', 'Sk-02'] },
+        // Sk-24 relocated from hand to the deck's top — see test 13's
+        // comment.
+        '0': { field: ['Sk-21'], hand: [], deck: ['Sk-24', 'Sk-01', 'Sk-02'] },
         '1': { field: [] },
       },
     });
@@ -329,7 +342,8 @@ describe('Sk-24a BLAZING SKY GOBLIN', () => {
   test('15. deck search never leaks the opponent\'s deck (order or contents) into this payload', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-21'], hand: ['Sk-24'], deck: ['Sk-08', 'Sk-27'] },
+        // Sk-24 relocated from hand to the deck's top — see test 13's comment.
+        '0': { field: ['Sk-21'], hand: [], deck: ['Sk-24', 'Sk-08', 'Sk-27'] },
         '1': { field: [], hand: ['Sk-29'], deck: ['Sk-02', 'Sk-03', 'Sk-04'] },
       },
     });
@@ -357,7 +371,13 @@ describe('Sk-20b SAGE OF DARK OMEN (onActivate)', () => {
   test('16. activating on the field removes it and pulls Arrival Of Doom to hand', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-20'], deck: ['Sk-03', 'Sk-01'] },
+        // Sk-30 filler ahead of Sk-03: the turn-1 auto-draw takes it first
+        // (genuinely irrelevant — no onDraw trigger, no interaction with
+        // this ability), leaving Sk-03 in the deck for effect b's own
+        // search to find. The auto-draw is NOT suppressed here — it fires
+        // and its result is accounted for explicitly in the hand assertion
+        // below, rather than hidden by pre-filling hand to 5.
+        '0': { field: ['Sk-20'], deck: ['Sk-30', 'Sk-03', 'Sk-01'] },
         '1': { field: [] },
       },
     });
@@ -367,7 +387,7 @@ describe('Sk-20b SAGE OF DARK OMEN (onActivate)', () => {
     expect(G().public.pendingChoice).toBeNull();
     expect(G().public.field['0'][0]).toBeNull();
     expect(G().public.banished['0']).toContain('Sk-20');
-    expect(G().secret.hands['0']).toEqual(['Sk-03']);
+    expect(G().secret.hands['0']).toEqual(['Sk-30', 'Sk-03']); // Sk-30: the turn-1 draw; Sk-03: this ability's own retrieval
     expect(G().public.deckCounts['0']).toBe(1);
   });
 
@@ -381,7 +401,11 @@ describe('Sk-20b SAGE OF DARK OMEN (onActivate)', () => {
   test('17. no Arrival Of Doom in deck: the whole ability resolves silently, Sk-20 stays on the field', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-20'], deck: ['Sk-01', 'Sk-02'] },
+        // Sk-30 filler ahead of the deck's real content — see test 16's
+        // comment. Deliberately no ARRIVAL OF DOOM anywhere here, including
+        // as the filler, so the search's own "no match" branch is still the
+        // thing under test.
+        '0': { field: ['Sk-20'], deck: ['Sk-30', 'Sk-01', 'Sk-02'] },
         '1': { field: [] },
       },
     });
@@ -391,7 +415,7 @@ describe('Sk-20b SAGE OF DARK OMEN (onActivate)', () => {
     expect(G().public.pendingChoice).toBeNull();
     expect(G().public.field['0'][0]?.label).toBe('Sk-20'); // never removed
     expect(G().public.banished['0']).not.toContain('Sk-20');
-    expect(G().public.handCounts['0']).toBe(0);
+    expect(G().secret.hands['0']).toEqual(['Sk-30']); // only the turn-1 draw — the ability itself retrieved nothing
     expect(G().public.deckCounts['0']).toBe(2); // untouched
   });
 });
@@ -400,7 +424,12 @@ describe('Sk-23a PORTAL MONARCH (onActivate)', () => {
   test('18. discard a Battle card (choosing among two) and retrieve a Battle card from deck', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-23'], hand: ['Sk-29', 'Sk-27'], deck: ['Sk-22', 'Sk-01'] },
+        // Sk-27 (the hand's trailing card) relocated to the deck's top: the
+        // automatic turn-1 auto-draw appends it back onto the end of hand,
+        // reconstructing the exact original hand ['Sk-29', 'Sk-27'] — same
+        // order, since the draw always appends — while Sk-22 stays
+        // protected deeper in the deck for the retrieve step to find.
+        '0': { field: ['Sk-23'], hand: ['Sk-29'], deck: ['Sk-27', 'Sk-22', 'Sk-01'] },
         '1': { field: [] },
       },
     });
@@ -429,7 +458,10 @@ describe('Sk-23a PORTAL MONARCH (onActivate)', () => {
   test('19. no matching type in deck: discard is handled sanely, retrieve resolves silently', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-23'], hand: ['Sk-29'], deck: ['Sk-01', 'Sk-02'] },
+        // Sk-29 (the sole hand card) relocated to the deck's top: the
+        // automatic turn-1 auto-draw draws it right back into hand,
+        // reconstructing the exact original hand/deck split.
+        '0': { field: ['Sk-23'], hand: [], deck: ['Sk-29', 'Sk-01', 'Sk-02'] },
         '1': { field: [] },
       },
     });
@@ -526,7 +558,9 @@ describe('Sk-07b ACE IN THE HOLE (onDraw)', () => {
       },
     });
 
-    client.moves.drawCard();
+    // The automatic turn-1 draw (turn.onBegin) already performed this exact
+    // draw during construction — drawCardForPlayer/fireOnDraw fire the same
+    // way regardless of caller (see game.ts). No manual move needed.
 
     const pending = G().public.pendingChoice;
     expect(pending).not.toBeNull();
@@ -550,7 +584,8 @@ describe('Sk-07b ACE IN THE HOLE (onDraw)', () => {
       },
     });
 
-    client.moves.drawCard();
+    // The automatic turn-1 draw already performed this exact draw during
+    // construction — see the equivalent note on test 24 above.
 
     expect(G().public.pendingChoice).toBeNull();
     expect(G().secret.hands['0']).toEqual(['Sk-07']);
@@ -565,7 +600,8 @@ describe('Sk-07b ACE IN THE HOLE (onDraw)', () => {
       },
     });
 
-    client.moves.drawCard();
+    // The automatic turn-1 draw already performed this exact draw during
+    // construction — see the equivalent note on test 24 above.
 
     const pending = G().public.pendingChoice;
     expect(pending).not.toBeNull();
@@ -587,7 +623,8 @@ describe('Sk-07b ACE IN THE HOLE (onDraw)', () => {
       },
     });
 
-    client.moves.drawCard();
+    // The automatic turn-1 draw already performed this exact draw during
+    // construction — see the equivalent note on test 24 above.
 
     expect(G().public.pendingChoice?.kind).toBe('yesNo');
     expect(G().secret.decks['1']).toBeUndefined();
@@ -605,7 +642,15 @@ describe('Sk-07b ACE IN THE HOLE (onDraw)', () => {
     // createTestGame swaps out setup() entirely (so tests can seed an exact
     // board), which necessarily bypasses the real opening-hand deal. Boot
     // the actual ShadowkhanGame here instead to exercise the real setup().
-    const realClient = Client({ game: ShadowkhanGame, numPlayers: 2, playerID: '0' });
+    // Seeded so the turn-1 auto-draw that follows the deal — a real draw,
+    // unrelated to what this test checks — deterministically does NOT land
+    // on Sk-07/Sk-28, the only two labels with an onDraw trigger; otherwise
+    // this test would be flaky (~1-in-27 per run) for a reason that has
+    // nothing to do with the opening deal itself, which is the one thing
+    // under test here. 'seed-0' was verified (by iterating candidate seeds
+    // against the real shuffle) to land the auto-drawn 4th card on neither
+    // label for player 0.
+    const realClient = Client({ game: { ...ShadowkhanGame, seed: 'seed-0' }, numPlayers: 2, playerID: '0' });
     realClient.start();
 
     expect(realClient.getState()!.G.public.pendingChoice).toBeNull();
@@ -943,7 +988,11 @@ describe('removal funneling: cross-cutting regressions', () => {
   test('47. onRemoved still fires exactly once on an ordinary battle-loss removal', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-14'], turnsTaken: 1, deck: ['Sk-01', 'Sk-02', 'Sk-03'] }, // BP 8 attacker
+        // Sk-30 filler ahead of the deck's real content: the automatic
+        // turn-1 auto-draw takes it instead (hand is never asserted on in
+        // this test, so it landing there is harmless), leaving the 3 real
+        // cards intact for onRemoved's own top-2 removal to consume.
+        '0': { field: ['Sk-14'], turnsTaken: 1, deck: ['Sk-30', 'Sk-01', 'Sk-02', 'Sk-03'] }, // BP 8 attacker
         '1': { field: [{ label: 'Sk-17', turnsOnField: 2 }] }, // BP 3, no gate/hook — onRemoved removes 2 of the OPPONENT's (attacker's) top deck cards
       },
     });
@@ -964,7 +1013,9 @@ describe('removal funneling: cross-cutting regressions', () => {
   test('48. Shockwave tie still removes from both decks face down; neither field card is removed', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-27'], deck: ['Sk-01', 'Sk-02'], turnsTaken: 1 }, // BP 5
+        // Sk-30 filler ahead of the deck's real content — see test 47's
+        // comment (hand is never asserted on in this test).
+        '0': { field: ['Sk-27'], deck: ['Sk-30', 'Sk-01', 'Sk-02'], turnsTaken: 1 }, // BP 5
         '1': { field: ['Sk-19'], deck: ['Sk-03', 'Sk-04'] }, // BP 5 — tie
       },
     });
@@ -1025,7 +1076,9 @@ describe('removal funneling: cross-cutting regressions', () => {
   test('141. onRemoved fires for BOTH removal causes in the same match — ability-driven (the gap this fix closed) and battle-driven (unchanged) — each firing exactly once for its own card', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-14', null, null], hand: ['Sk-05'], turnsTaken: 1, deck: ['Sk-01', 'Sk-02', 'Sk-03'] },
+        // Sk-30 filler ahead of the deck's real content — see test 47's
+        // comment (player 0's final hand is never asserted on here).
+        '0': { field: ['Sk-14', null, null], hand: ['Sk-05'], turnsTaken: 1, deck: ['Sk-30', 'Sk-01', 'Sk-02', 'Sk-03'] },
         '1': { field: [{ label: 'Sk-17', turnsOnField: 2 }, { label: 'Sk-17', turnsOnField: 1 }, null] },
       },
     });
@@ -1064,7 +1117,9 @@ describe('removal funneling: cross-cutting regressions', () => {
   test('142. onRemoved does NOT fire when the removal is PREVENTED outright — protectedFromBattleCardRemoval blocks the ability before finishFieldRemoval ever runs', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { hand: ['Sk-05'], deck: ['Sk-01', 'Sk-02', 'Sk-03'] },
+        // Sk-30 filler ahead of the deck's real content — see test 47's
+        // comment.
+        '0': { hand: ['Sk-05'], deck: ['Sk-30', 'Sk-01', 'Sk-02', 'Sk-03'] },
         '1': { field: [{ label: 'Sk-17', turnsOnField: 2, protectedFromBattleCardRemoval: true }] },
       },
     });
@@ -1115,7 +1170,9 @@ describe('removal funneling: cross-cutting regressions', () => {
     const { client, client1, G, G1 } = createTestGame({
       players: {
         '0': { field: [{ label: 'Sk-17', turnsOnField: 2 }, 'Sk-29', null] },
-        '1': { hand: ['Sk-05'], deck: ['Sk-01', 'Sk-02', 'Sk-03'] },
+        // Sk-30 filler ahead of the deck's real content — see test 47's
+        // comment (player 1's final hand is never asserted on here).
+        '1': { hand: ['Sk-05'], deck: ['Sk-30', 'Sk-01', 'Sk-02', 'Sk-03'] },
       },
       currentPlayer: '1',
     });
@@ -1507,8 +1564,13 @@ describe('Sk-20a SAGE OF DARK OMEN (multi-select)', () => {
       players: {
         '0': {
           field: ['Sk-20'],
-          hand: ['Sk-01', 'Sk-02', 'Sk-04', 'Sk-27'], // 4 candidates for an exact-3 cost — a real choice
-          deck: ['Sk-14', 'Sk-15', 'Sk-17'], // Sk-14 (BP8), Sk-15 (BP7) qualify; Sk-17 (BP3) doesn't
+          // Sk-27 (the hand's trailing card) relocated to the deck's top:
+          // the automatic turn-1 auto-draw appends it back onto the end of
+          // hand, reconstructing the exact original 4-card hand in the
+          // exact original order (the draw always appends), while Sk-14
+          // stays protected deeper in the deck for the deck-removal step.
+          hand: ['Sk-01', 'Sk-02', 'Sk-04'], // 4 candidates for an exact-3 cost — a real choice
+          deck: ['Sk-27', 'Sk-14', 'Sk-15', 'Sk-17'], // Sk-14 (BP8), Sk-15 (BP7) qualify; Sk-17 (BP3) doesn't
         },
         '1': { field: [] },
       },
@@ -1636,8 +1698,10 @@ describe('Sk-20a SAGE OF DARK OMEN (multi-select)', () => {
       players: {
         '0': {
           field: ['Sk-20'],
-          hand: ['Sk-01', 'Sk-02', 'Sk-04'], // exactly 3 — the cost auto-applies, no prompt
-          deck: ['Sk-14', 'Sk-17'], // only Sk-14 (BP8) qualifies; Sk-17 (BP3) doesn't
+          // Sk-04 (the hand's trailing card) relocated to the deck's top —
+          // see test 63b's comment.
+          hand: ['Sk-01', 'Sk-02'], // exactly 3 — the cost auto-applies, no prompt
+          deck: ['Sk-04', 'Sk-14', 'Sk-17'], // only Sk-14 (BP8) qualifies; Sk-17 (BP3) doesn't
         },
         '1': { field: [] },
       },
@@ -1670,8 +1734,9 @@ describe('Sk-20a SAGE OF DARK OMEN (multi-select)', () => {
       players: {
         '0': {
           field: ['Sk-20'],
-          hand: ['Sk-01', 'Sk-02', 'Sk-04', 'Sk-27'],
-          deck: ['Sk-14', 'Sk-15', 'Sk-17'],
+          // Sk-27 relocated to the deck's top — see test 63b's comment.
+          hand: ['Sk-01', 'Sk-02', 'Sk-04'],
+          deck: ['Sk-27', 'Sk-14', 'Sk-15', 'Sk-17'],
         },
         '1': { field: [], hand: ['Sk-30'], deck: ['Sk-02', 'Sk-03', 'Sk-04'] },
       },
@@ -1782,7 +1847,10 @@ describe('Sk-03b ARRIVAL OF DOOM (own-field removal + War Dragon retrieval)', ()
   test('66. War Dragon nowhere to be found: the field removal still happens, and the retrieval half fizzles silently', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-20'], hand: ['Sk-03'], deck: ['Sk-02'] },
+        // Sk-03 (the sole hand card) relocated to the deck's top: the
+        // automatic turn-1 auto-draw draws it right back into hand,
+        // reconstructing the exact original hand/deck split.
+        '0': { field: ['Sk-20'], hand: [], deck: ['Sk-03', 'Sk-02'] },
         '1': { field: [] },
       },
     });
@@ -1901,12 +1969,13 @@ describe('Sk-07a ACE IN THE HOLE (onDraw, last card of the deck)', () => {
       seed: 'sk07a-determinism-seed',
     };
 
+    // The automatic turn-1 draw already performed this exact draw during
+    // construction, for each independently-seeded run — see the equivalent
+    // note on test 24 above.
     const run1 = createTestGame(setup);
-    run1.client.moves.drawCard();
     run1.client.moves.resolveChoice(true);
 
     const run2 = createTestGame(setup);
-    run2.client.moves.drawCard();
     run2.client.moves.resolveChoice(true);
 
     expect(run1.G().secret.decks['0']).toHaveLength(10);
@@ -1921,7 +1990,8 @@ describe('Sk-07a ACE IN THE HOLE (onDraw, last card of the deck)', () => {
       },
     });
 
-    client.moves.drawCard();
+    // The automatic turn-1 draw already performed this exact draw during
+    // construction — see the equivalent note on test 24 above.
 
     const pending = G().public.pendingChoice;
     expect(pending).not.toBeNull();
@@ -1945,7 +2015,8 @@ describe('Sk-07a ACE IN THE HOLE (onDraw, last card of the deck)', () => {
       },
     });
 
-    client.moves.drawCard();
+    // The automatic turn-1 draw already performed this exact draw during
+    // construction — see the equivalent note on test 24 above.
 
     expect(G().public.pendingChoice).toBeNull();
     expect(G().public.banished['0']).toHaveLength(5); // untouched
@@ -1961,7 +2032,8 @@ describe('Sk-07a ACE IN THE HOLE (onDraw, last card of the deck)', () => {
       },
     });
 
-    client.moves.drawCard();
+    // The automatic turn-1 draw already performed this exact draw during
+    // construction — see the equivalent note on test 24 above.
     client.moves.resolveChoice(false);
 
     expect(G().public.pendingChoice).toBeNull();
@@ -1978,7 +2050,8 @@ describe('Sk-07a ACE IN THE HOLE (onDraw, last card of the deck)', () => {
       },
     });
 
-    client.moves.drawCard();
+    // The automatic turn-1 draw already performed this exact draw during
+    // construction — see the equivalent note on test 24 above.
     client.moves.resolveChoice(true);
 
     expect(G().secret.decks['0']).toHaveLength(10); // visible to the owning player's own client, as normal
@@ -2067,7 +2140,10 @@ describe('Sk-08a A SINISTER ALLIANCE (field placement, deck search)', () => {
       players: {
         // Sk-01 (real index 0) is not an ally and must never be offered.
         // Sk-25 and Sk-24 (real indices 1, 2) are the two eligible allies.
-        '0': { field: ['Sk-21', null, null], hand: ['Sk-08'], deck: ['Sk-01', 'Sk-25', 'Sk-24'] },
+        // Sk-08 (the sole hand card) relocated to the deck's top: the
+        // automatic turn-1 auto-draw draws it right back into hand,
+        // reconstructing the exact original hand/deck split.
+        '0': { field: ['Sk-21', null, null], hand: [], deck: ['Sk-08', 'Sk-01', 'Sk-25', 'Sk-24'] },
         '1': { field: [] },
       },
     });
@@ -2099,7 +2175,8 @@ describe('Sk-08a A SINISTER ALLIANCE (field placement, deck search)', () => {
   test('80. declining the optional prompt leaves the deck and field untouched', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-21', null, null], hand: ['Sk-08'], deck: ['Sk-25'] },
+        // Sk-08 relocated to the deck's top — see test 79's comment.
+        '0': { field: ['Sk-21', null, null], hand: [], deck: ['Sk-08', 'Sk-25'] },
         '1': { field: [] },
       },
     });
@@ -2116,7 +2193,8 @@ describe('Sk-08a A SINISTER ALLIANCE (field placement, deck search)', () => {
   test('81. no eligible ally in the deck: resolves silently, no prompt opens', () => {
     const { client, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-21', null, null], hand: ['Sk-08'], deck: ['Sk-01'] },
+        // Sk-08 relocated to the deck's top — see test 79's comment.
+        '0': { field: ['Sk-21', null, null], hand: [], deck: ['Sk-08', 'Sk-01'] },
         '1': { field: [] },
       },
     });
@@ -2360,7 +2438,11 @@ describe('createTestGame: two independent clients over one shared match', () => 
   test("92. each player's playerView hides the other's secret hand and deck, verified from both sides", () => {
     const { G, G1 } = createTestGame({
       players: {
-        '0': { hand: ['Sk-01'], deck: ['Sk-02'] },
+        // Sk-01 (the sole hand card) relocated to the deck's top: the
+        // automatic turn-1 auto-draw draws it right back into hand,
+        // reconstructing the exact original hand/deck split with no moves
+        // dispatched at all in this test.
+        '0': { hand: [], deck: ['Sk-01', 'Sk-02'] },
         '1': { hand: ['Sk-03'], deck: ['Sk-04'] },
       },
     });
@@ -2558,7 +2640,12 @@ describe('Sk-06 TRANSFORMATION CHAMBER (scheduled summon)', () => {
   test('99. full chain: select (auto), pay the cost (real multi-select), stays hidden and un-summoned through the intervening turn, then places on the correct later turn', () => {
     const { client, client1, G, G1 } = createTestGame({
       players: {
-        '0': { field: [], hand: ['Sk-06', 'Sk-01'], deck: ['Sk-20', 'Sk-02', 'Sk-08', 'Sk-03'] },
+        // Sk-01 (the hand's trailing card) relocated to the deck's top: the
+        // automatic turn-1 auto-draw appends it back onto the end of hand,
+        // reconstructing the exact original hand ['Sk-06', 'Sk-01'] — same
+        // order, since the draw always appends — while Sk-20 stays
+        // protected deeper in the deck for effect a's own search to find.
+        '0': { field: [], hand: ['Sk-06'], deck: ['Sk-01', 'Sk-20', 'Sk-02', 'Sk-08', 'Sk-03'] },
         '1': { field: [] },
       },
     });
@@ -2664,7 +2751,10 @@ describe('Sk-06 TRANSFORMATION CHAMBER (scheduled summon)', () => {
       players: {
         // Only Sk-20 (BP2) is in the deck; after it leaves as the candidate,
         // 0 cards remain in hand+deck combined to pay its BP-2 cost.
-        '0': { field: [], hand: ['Sk-06'], deck: ['Sk-20'] },
+        // Sk-06 (the sole hand card) relocated to the deck's top: the
+        // automatic turn-1 auto-draw draws it right back into hand,
+        // reconstructing the exact original hand/deck split.
+        '0': { field: [], hand: [], deck: ['Sk-06', 'Sk-20'] },
         '1': { field: [] },
       },
     });
@@ -2753,7 +2843,13 @@ describe('Sk-09 POWER OF THE SHADOWS (attach target)', () => {
   test('106. the protection expires at its stated time, and the host is removable again', () => {
     const { client, client1, G } = createTestGame({
       players: {
-        '0': { field: ['Sk-15', 'Sk-25', null], hand: ['Sk-09', 'Sk-11'], deck: ['Sk-01'] },
+        // Sk-11 (the hand's trailing card) relocated to the deck's top: the
+        // turn-1 auto-draw appends it right back onto the end of hand
+        // (reconstructing the exact original hand ['Sk-09', 'Sk-11'] and
+        // deck ['Sk-01']) before Sk-09 is even played, so the SECOND
+        // auto-draw two turns later — the one this test actually cares
+        // about — still finds exactly Sk-01 waiting, same as before.
+        '0': { field: ['Sk-15', 'Sk-25', null], hand: ['Sk-09'], deck: ['Sk-11', 'Sk-01'] },
         '1': { field: [] },
       },
     });
@@ -2850,11 +2946,17 @@ describe('Sk-26 ABDUCTION SAUCER (steal-and-hold, once per turn)', () => {
   test('110. a second attempt in the same turn is rejected; it works again on the next turn', () => {
     const { client, client1, G } = createTestGame({
       players: {
-        // deck fillers on both sides: once bothReady goes true (after both
-        // players have taken a turn), turn.onBegin attempts a normal draw
-        // for whoever's turn is starting, and an empty deck there would
-        // auto-lose that player before this test's own assertions run.
-        '0': { field: ['Sk-26', null, null], deck: ['Sk-02'] },
+        // deck fillers: once both players have taken a turn, turn.onBegin
+        // attempts a normal draw for whoever's turn is starting, and an
+        // empty deck there would auto-lose that player before this test's
+        // own assertions run. Player 0 now goes through the auto-draw
+        // TWICE in this test (the turn-1 draw at construction, then the
+        // real one at their second onBegin two endTurns later) — an extra
+        // Sk-30 filler ahead of Sk-02 absorbs the first, leaving Sk-02 for
+        // the second exactly as this test always intended. Hand content is
+        // never asserted in this test, so which card lands there doesn't
+        // matter — only that the deck never runs dry mid-sequence.
+        '0': { field: ['Sk-26', null, null], deck: ['Sk-30', 'Sk-02'] },
         '1': { field: ['Sk-20', 'Sk-21'], deck: ['Sk-01'] },
       },
     });
@@ -3436,7 +3538,10 @@ describe('Sk-28b/c SKULLFACE (planted-card countdown)', () => {
       currentPlayer: '1',
     });
 
-    client1.moves.drawCard();
+    // Reaching currentPlayer: '1' dispatches an implicit endTurn during
+    // construction (see createTestGame), which already ran player 1's own
+    // first onBegin — the automatic turn-1 draw already performed this
+    // exact draw before the test body even starts.
 
     expect(G().public.handCounts['1']).toBe(1); // Sk-28 itself, drawn normally — still played out, not intercepted
     expect(G().public.deckCounts['1']).toBe(1); // 5 - 1 (drawn) - 3 (payoff) = 1 left
@@ -3500,7 +3605,8 @@ describe('Sk-28b/c SKULLFACE (planted-card countdown)', () => {
       },
     });
 
-    client.moves.drawCard(); // player 0 draws Sk-07 as their last card
+    // The automatic turn-1 draw already drew Sk-07 as player 0's last deck
+    // card during construction — see the equivalent note on test 24 above.
     client.moves.resolveChoice(true); // shuffles 10 removed cards into player 0's OWN deck
 
     expect(G().secret.decks['0']).toHaveLength(10); // player 0's own deck, unrelated to Sk-28
@@ -3624,5 +3730,188 @@ describe('attackHandRandom (Sk-02 hand/deck-attack intercept parity)', () => {
       expect(G().public.handCounts['1']).toBe(3);
       expect(G().public.banished['1']).toEqual([]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One-Battle-Card-per-turn limit. Sk-27 (CRIMSON SHE-KNIGHT) and Sk-29
+// (RAREWOLF) are both plain Battle Cards with no onSummon effect of their
+// own (Sk-27's ability triggers onBattleWin, Sk-29's is a GUARDIAN_HOOKS
+// entry consulted on removal), so playing either never opens a pendingChoice
+// — clean candidates for a limit test that only cares about placement itself.
+// Sk-01/Sk-02 are similarly the simplest Action Cards (Sk-01 is a bare
+// global-flag flip, Sk-02 has no ABILITIES_BY_LABEL entry at all).
+// ---------------------------------------------------------------------------
+describe('Battle Card per-turn limit', () => {
+  test('a1. one Battle Card per turn: a second is rejected, leaving hand and field unchanged', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-27', 'Sk-29'], deck: ['Sk-17'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-27 into slot 0 — the turn's one Battle Card
+    expect(G().public.field['0'][0]?.label).toBe('Sk-27');
+    expect(G().public.battleCardPlayedThisTurn).toBe(true);
+
+    client.moves.playCard(0, 1); // Sk-29 (now hand index 0) — second Battle Card, rejected
+    expect(G().public.field['0'][1]).toBeNull();
+    expect(G().secret.hands['0']).toContain('Sk-29');
+    expect(G().public.field['0'].filter((c) => c?.label === 'Sk-29')).toHaveLength(0);
+  });
+
+  test('a2. playing a Battle Card does not block playing an Action or Power card the same turn', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-27', 'Sk-01'], deck: ['Sk-17'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-27 (Battle) into slot 0
+    expect(G().public.field['0'][0]?.label).toBe('Sk-27');
+    expect(G().public.battleCardPlayedThisTurn).toBe(true);
+
+    client.moves.playCard(0, 1); // Sk-01 (Action) into slot 1 — not blocked by the Battle Card limit
+    expect(G().public.field['0'][1]?.label).toBe('Sk-01');
+    expect(G().public.rulesOfEngagementActive).toBe(true);
+  });
+
+  test('a3. the limit resets on the next turn', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-27', 'Sk-29'], deck: ['Sk-17', 'Sk-18'], turnsTaken: 1 },
+        '1': { field: [], hand: [], deck: ['Sk-19', 'Sk-20'], turnsTaken: 1 },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-27 — this turn's one Battle Card
+    expect(G().public.battleCardPlayedThisTurn).toBe(true);
+
+    client.moves.endTurn(); // -> player 1's turn (flag reset in onBegin)
+    client1.moves.endTurn(); // -> back to player 0 (flag reset again)
+
+    expect(G().public.battleCardPlayedThisTurn).toBe(false);
+
+    // Locate Sk-29 by label rather than assuming its hand index — the
+    // intervening auto-draws (see the Draw rework tests below) may have
+    // appended cards ahead of it.
+    const idx = G().secret.hands['0'].indexOf('Sk-29');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    client.moves.playCard(idx, 1); // Sk-29 — a fresh Battle Card play, legal again
+    expect(G().public.field['0'][1]?.label).toBe('Sk-29');
+  });
+
+  test('a4. Action/Power cards do not consume the Battle Card allowance: two Actions the same turn both succeed', () => {
+    const { client, G } = createTestGame({
+      players: {
+        '0': { field: [], hand: ['Sk-01', 'Sk-02'], deck: ['Sk-17'] },
+        '1': { field: [] },
+      },
+    });
+
+    client.moves.playCard(0, 0); // Sk-01 (Action) into slot 0
+    client.moves.playCard(0, 1); // Sk-02 (Action, now hand index 0) into slot 1
+
+    expect(G().public.field['0'][0]?.label).toBe('Sk-01');
+    expect(G().public.field['0'][1]?.label).toBe('Sk-02');
+    expect(G().public.battleCardPlayedThisTurn).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Draw rework: the bothReady gate is removed (auto-draw fires from turn 1)
+// and the manual drawCard move is deleted entirely — drawCardForPlayer/
+// fireOnDraw themselves are untouched, so any onDraw ability must still fire
+// exactly as before, just reached through turn.onBegin only.
+// ---------------------------------------------------------------------------
+describe('Draw rework (turn 1 auto-draw, drawCard move removed)', () => {
+  test("b1. turn 1: the current player's hand grows by exactly 1 at turn start via the automatic draw", () => {
+    const { G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-01', 'Sk-02', 'Sk-03'], deck: ['Sk-17', 'Sk-18'] },
+        '1': { field: [] },
+      },
+    });
+
+    // No move has been dispatched — this is the state right after turn 1's
+    // own onBegin. Previously bothReady required BOTH players to have taken
+    // a turn first, so this draw never happened this early.
+    expect(G().secret.hands['0']).toHaveLength(4);
+    expect(G().secret.hands['0']).toContain('Sk-17');
+    expect(G().secret.decks['0']).toEqual(['Sk-18']);
+  });
+
+  test('b2. the drawCard move no longer exists on the client', () => {
+    const { client } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-01'], deck: ['Sk-17'] },
+        '1': { field: [] },
+      },
+    });
+
+    expect(typeof (client.moves as unknown as Record<string, unknown>).drawCard).not.toBe('function');
+  });
+
+  test("b3. a card effect that fires on draw (Sk-07's onDraw) still triggers via the automatic turn-1 draw", () => {
+    const { G } = createTestGame({
+      players: {
+        '0': { hand: [], deck: ['Sk-07', 'Sk-17'] },
+        '1': { field: [] },
+      },
+    });
+
+    const pending = G().public.pendingChoice;
+    expect(pending).not.toBeNull();
+    expect(pending?.kind).toBe('yesNo');
+    expect(pending?.sourceLabel).toBe('Sk-07');
+    expect(pending?.abilitySlot).toBe('b-confirm');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deck-out timing: turn.onBegin's own draw-or-lose check only ever loses a
+// player once BOTH G.public.turnsTaken['0'] and ['1'] are >= 1 — the same
+// two-player condition the old bothReady gate expressed, now scoped to just
+// the loss branch (the auto-draw itself fires from turn 1 unconditionally).
+// A player's OWN turnsTaken alone is not enough: a card-legality idiom
+// elsewhere in this suite seeds turnsTaken: 1 on just the current player to
+// unlock attackBattleCard's own gate, with the opponent's left at its 0
+// default — that must not read as "deck-out eligible" on its own. Locks
+// both halves in so a future change can't silently reintroduce either a
+// turn-1 deck-out or a single-player-only deck-out check.
+// ---------------------------------------------------------------------------
+describe('Deck-out timing rule', () => {
+  test('a player whose own turnsTaken is already >= 1 does not lose by deck-out while the opponent has not started yet', () => {
+    // Mirrors the turnsTaken: 1 (attack-legality) idiom used throughout this
+    // suite — this is exactly the shape that regressed before this guard
+    // was fixed to require BOTH players, not just pid's own count.
+    const { G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-01'], deck: [], turnsTaken: 1 },
+        '1': { hand: ['Sk-02'], deck: ['Sk-03'] }, // turnsTaken defaults to 0 — has not started yet
+      },
+    });
+
+    expect(G().public.loser).toBeNull();
+  });
+
+  test('a player cannot lose by deck-out until BOTH players have started, then does once the deck is still empty', () => {
+    const { client, client1, G } = createTestGame({
+      players: {
+        '0': { hand: ['Sk-01'], deck: [] },
+        '1': { hand: ['Sk-02'], deck: ['Sk-03'] },
+      },
+    });
+
+    // Turn 1: neither player has started yet — must NOT lose.
+    expect(G().public.loser).toBeNull();
+
+    client.moves.endTurn(); // -> player 1's turn; player 0 has now started, player 1 has not yet
+    expect(G().public.loser).toBeNull(); // still not BOTH started
+
+    client1.moves.endTurn(); // -> player 0's second turn: both have now started, deck is still empty
+    expect(G().public.loser).toBe('0');
   });
 });

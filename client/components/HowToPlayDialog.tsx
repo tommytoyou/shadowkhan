@@ -91,8 +91,8 @@ export default function HowToPlayDialog({
           <ol className="mt-1.5 space-y-1 text-sm text-sk-slate">
             <li>
               <span className="text-white">1.</span> A card is drawn for you automatically at the
-              start of your turn, once both players have taken one turn and you hold fewer than 5
-              cards.
+              start of every turn, including your first, whenever you hold fewer than 5 cards.
+              There&apos;s no manual draw.
             </li>
             <li>
               <span className="text-white">2.</span> Play cards to your field and make up to one
@@ -108,7 +108,9 @@ export default function HowToPlayDialog({
         <section className="mt-6">
           <h3 className={EYEBROW}>Playing a card</h3>
           <p className="mt-1.5 text-sm text-sk-slate">
-            Click a card in your hand, then click one of your three empty field slots.
+            Click a card in your hand, then click one of your three empty field slots. You may
+            play only one Battle Card per turn, unless a card effect allows more — Action and
+            Power cards have no such limit.
           </p>
         </section>
 
@@ -137,10 +139,6 @@ export default function HowToPlayDialog({
         <section className="mt-6">
           <h3 className={EYEBROW}>The other controls</h3>
           <dl className="mt-1.5 space-y-1.5 text-sm text-sk-slate">
-            <div>
-              <dt className="inline text-white">Draw card. </dt>
-              <dd className="inline">Take one more card, up to a hand of 5.</dd>
-            </div>
             <div>
               <dt className="inline text-white">Bottom-up. </dt>
               <dd className="inline">

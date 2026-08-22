@@ -259,6 +259,15 @@ export interface PublicState {
   turnsTaken: Record<string, number>;
   bottomUpUsed: Record<string, boolean>;
   attackedThisTurn: boolean;
+  /** true once the current player has played a Battle Card this turn — reset
+   *  unconditionally in turn.onBegin alongside attackedThisTurn. A single
+   *  global flag, not per-player, matching attackedThisTurn's own shape (it
+   *  only ever means anything for whoever ctx.currentPlayer is when it's
+   *  checked, since only the current player's moves consult it). A future
+   *  card effect that grants an extra Battle Card play this turn can simply
+   *  set this back to false from its own run() — no structural change
+   *  needed, the same way any ability already mutates public G directly. */
+  battleCardPlayedThisTurn: boolean;
   loser: string | null;
   /** Global rule flip from RULES OF ENGAGEMENT (Sk-01): losing the BP comparison
    *  reduces the defender's BP instead of removing the attacker. */

@@ -78,6 +78,10 @@ export interface BoardPositionSpec {
    *  not a shortcut). None of the current test cases need this path. */
   currentPlayer?: PlayerID;
   attackedThisTurn?: boolean;
+  /** G.public.battleCardPlayedThisTurn. Defaults to false. Seedable so a test
+   *  can start mid-turn, already past a Battle Card play, without re-playing
+   *  one through the real playCard move first. */
+  battleCardPlayedThisTurn?: boolean;
   pendingChoice?: PendingChoice | null;
   rulesOfEngagementActive?: boolean;
   /** G.public.activeEffects. Defaults to []. */
@@ -150,6 +154,7 @@ function buildG(spec: BoardPositionSpec): ShadowkhanG {
       turnsTaken: { '0': p0.turnsTaken ?? 0, '1': p1.turnsTaken ?? 0 },
       bottomUpUsed: { '0': false, '1': false },
       attackedThisTurn: spec.attackedThisTurn ?? false,
+      battleCardPlayedThisTurn: spec.battleCardPlayedThisTurn ?? false,
       loser: null,
       rulesOfEngagementActive: spec.rulesOfEngagementActive ?? false,
       pendingChoice: spec.pendingChoice ?? null,
